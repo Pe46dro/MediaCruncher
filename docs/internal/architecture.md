@@ -293,3 +293,294 @@ The transcoder lifecycle for each job follows these phases:
 ### Trade-offs and Design Justification
 
 Staging files are used to prevent partial output from contaminating the output directory, which adds disk I/O overhead (write to staging, then move to output) but eliminates race conditions where another process reads a partially written output file. The VMAF verification is performed on the full file rather than a subset to provide the most accurate quality assessment, which increases encoding pipeline duration but ensures quality compliance. Hardware encoding is preferred for supported codecs but falls back to software encoding to maintain functionality on systems with limited GPU capabilities. The single-retry policy for quality failures balances thoroughness against pipeline throughput: a single retry catches transient hardware issues without creating long retry loops. Temporary file cleanup is deferred in failure cases to enable forensic analysis, with a configurable retention period that is periodically cleaned by a background maintenance operation. All media processing operations in the transcoder — including ffmpeg encoding, VMAF quality verification, and ffprobe-based corruption detection — are implemented as external process invocations rather than library bindings, maintaining the zero-CGO constraint by design and isolating crashes or memory issues in the media tools from the application runtime at the cost of inter-process communication overhead and process spawn latency.
+
+---
+
+## Module E: Concurrency Engine
+
+### Primary Responsibility
+
+Orchestrate the concurrent processing of transcoding jobs across a configurable pool of workers, implementing priority-based task routing, backpressure-aware concurrency control, graceful worker lifecycle management, and retry logic with exponential backoff. The concurrency engine is the operational heart of the system, transforming the ordered queue of pending work into parallel execution while respecting resource limits, enforcing cancellation through context propagation, and transitioning to a drain phase during shutdown.
+
+### Core Data Structures
+
+- Task Queue: An in-memory priority queue that holds pending work items ordered by priority level and submission time. The queue supports atomic claim operations that remove the highest-priority available item for a specific worker, preventing duplicate assignments. The queue carries a configurable maximum depth that triggers backpressure when full.
+
+- Worker Pool: A collection of active and idle workers, each associated with a processing context that carries cancellation signals for lifecycle management. The pool tracks worker state (idle, processing, draining, stopped), the current job assignment, and processing statistics per worker.
+
+- Routing Table: A mapping of evaluation outcomes to worker dispatch strategies. After a file is evaluated, the routing table determines whether the work item should be dispatched to a transcoder worker, sent for notification processing, or marked complete. The routing table is configured by the evaluation pipeline's decision outcomes.
+
+- Retry Record: Metadata attached to queue entries that have failed processing, tracking the retry count, next scheduled retry time based on exponential backoff, the failure reason, and whether the maximum retry limit has been reached.
+
+### Key Interface Contracts
+
+- Task Submission: Accepts work items from the ingestion pipeline (file paths for evaluation) and the filesystem engine (completed scan items). Items are enqueued with a priority level and a job type classifier (evaluate, transcode, notify). The submission interface returns a status indicating acceptance or rejection due to queue capacity limits, triggering backpressure upstream.
+
+- Priority Claim: Workers claim the highest-priority available item for their job type. The claim operation is atomic: only one worker can claim a specific item, and the item transitions from pending to processing state with the worker identifier recorded. Items are claimed in priority order within each job type, with lower-priority items served only when all higher-priority items are in progress or queued.
+
+- Worker Dispatch: Routes a claimed item to the appropriate processing stage based on its job type. Evaluation items are dispatched to the evaluation pipeline module. Transcode items are dispatched to the transcoder module. Notification items are dispatched to the notification module. The dispatch operation creates a cancellation context for the worker and returns a result channel for collecting the outcome.
+
+- Result Collection: Collects the outcome from dispatched workers, including success, failure with error detail, or timeout. On success, the result is processed according to the routing table (e.g., a successful evaluation may enqueue a transcode job). On failure, the retry logic determines whether to requeue the item with an exponential backoff delay or mark it as permanently failed.
+
+- Backpressure Enforcement: When the task queue reaches its configured capacity, new task submissions are blocked until space becomes available through worker completion. The backpressure signal propagates upstream: ingestion slows when evaluation queues fill, evaluation slows when transcode queues fill, creating a cascading flow-control mechanism.
+
+- Worker Lifecycle: Initializes the configured number of workers, each running an independent processing loop that claims items, dispatches work, collects results, and repeats. During graceful shutdown, the engine transitions to a drain phase: no new items are accepted, existing workers complete their current assignments, and the engine waits for all workers to finish before reporting completion.
+
+### State Flow and Lifecycle
+
+The concurrency engine lifecycle follows these phases:
+
+1. Initialization: The engine creates the task queue with configured priority levels and capacity limits, initializes the worker pool with the specified worker count, and establishes the routing table based on evaluation outcomes and transcode decisions. Each worker is launched with its own cancellation context.
+
+2. Processing: Workers continuously claim items from the task queue and dispatch them to the appropriate processing modules. Results are collected, routed, and either enqueued as follow-up work (evaluation results trigger transcode jobs) or marked as complete. The engine monitors queue depths and worker utilization, publishing metrics at regular intervals.
+
+3. Retry Handling: Failed jobs enter the retry record system. The first retry is scheduled after a base backoff interval. Each subsequent failure doubles the backoff interval up to a configured maximum. If the retry count reaches the maximum, the job is marked as permanently failed and flagged for review in the persistence engine.
+
+4. Drain Phase: During graceful shutdown, the engine stops accepting new task submissions, signals all workers to stop after their current assignment completes, and waits for all workers to finish. In-progress jobs complete normally; new items are rejected. The engine waits up to a configured drain timeout before forcibly stopping remaining workers.
+
+5. Shutdown: After all workers have completed or been stopped, the engine records final statistics, flushes any pending audit log entries, and reports the drain completion status to the shutdown coordinator.
+
+### Error Handling and Recovery Strategy
+
+- Queue capacity overflow: When the task queue is full and new items cannot be enqueued, the upstream module (filesystem engine, evaluation pipeline, or external submission) is signalled to slow down. The blocked submission retries after a short interval. If the queue remains full for an extended period, the engine logs a warning about sustained backpressure.
+
+- Worker crashes: If a worker process terminates unexpectedly, the in-flight job is requeued with incremented retry count. The worker pool automatically replaces the crashed worker with a new instance. The job is re-evaluated from the beginning of its processing stage.
+
+- Dispatch failures: If the target processing module (evaluation pipeline or transcoder) cannot accept a dispatch (e.g., the module is unhealthy or the context is cancelled), the job is requeued with a brief delay. Repeated dispatch failures to the same module cause the engine to mark that module as degraded and log a warning.
+
+- Timeout handling: Each dispatched job has a configurable timeout. If the job exceeds its timeout, the worker's cancellation context is triggered, the in-flight operation should abort, and the result is treated as a timeout failure. The job enters the retry cycle with exponential backoff.
+
+### Integration Points
+
+- Module A (Persistence Engine): Reads pending queue entries on startup after recovery, claims jobs by updating queue entry state to processing, and writes completion or failure state transitions.
+
+- Module B (Filesystem Engine): Receives scan result items through the task submission interface when the filesystem engine pushes completed scan items into the processing pipeline.
+
+- Module C (Evaluation Pipeline): Receives evaluation task dispatches from the task queue. The concurrency engine collects evaluation results and routes them based on the routing table.
+
+- Module D (Transcoder): Receives transcode task dispatches. The concurrency engine collects transcoding results and reports completion status.
+
+- Module F (Notification Engine): Receives notification task dispatches for events that require outbound communication.
+
+- Cross-Cutting (Configuration Management): Reads worker pool size, queue capacity, retry policies, backoff settings, and drain timeout from centralized configuration.
+
+- Cross-Cutting (Graceful Shutdown): Receives the shutdown signal and orchestrates the drain sequence. Reports drain completion to the shutdown coordinator.
+
+- Cross-Cutting (Observability): Publishes queue depth, worker utilization, task completion rates, retry counts, and backpressure duration metrics.
+
+### Trade-offs and Design Justification
+
+An in-memory task queue was chosen over a persistent queue to minimize latency and avoid the complexity of distributed task management for a single-process daemon. The zero-CGO constraint is satisfied by implementing the priority queue with a pure-Go heap data structure. The worker pool model with context-based cancellation provides fine-grained control over worker lifecycle and shutdown behavior without requiring external process management. The exponential backoff retry policy prevents thundering herd scenarios where many retried jobs flood the system simultaneously. Backpressure is enforced at the queue submission level rather than through rate limiting, creating a natural flow-control mechanism that adapts to actual system load rather than a fixed rate. The routing table approach decouples the concurrency engine from the specific processing pipeline, allowing the system to add new processing stages without modifying the core orchestration logic.
+
+---
+
+## Module F: Notification Engine
+
+### Primary Responsibility
+
+Deliver operational notifications to external communication channels through a pluggable adapter architecture, providing real-time visibility into system events such as job completions, quality failures, scan progress, and system errors. The notification engine batches events, enforces rate limits per channel, tracks delivery acknowledgments, and implements dead-letter handling for failed deliveries.
+
+### Core Data Structures
+
+- Event: The atomic unit of notification, containing an event type (job completed, job failed, scan started, scan completed, quality threshold exceeded, system error), event severity (info, warning, error, critical), a timestamp, contextual data relevant to the event type, and a unique event identifier. Events are the input to the notification system.
+
+- Channel Adapter: A pluggable delivery mechanism for a specific notification platform. Each adapter implements a standardized delivery interface and carries configuration for its platform (webhook URL, API credentials, channel identifier). Adapters are registered at startup and selected by the notification routing logic.
+
+- Message Batch: A collection of events grouped for batched delivery to a channel adapter. Batches are sized by count or age threshold, whichever comes first. Batching reduces per-message overhead for platforms that support bulk delivery and reduces the number of API calls to notification services.
+
+- Delivery Record: A per-event record tracking the delivery status, the target channel adapter used, the delivery timestamp, the response from the notification platform, and any error encountered during delivery. Delivery records are appended to the audit log for accountability.
+
+### Key Interface Contracts
+
+- Adapter Registration: Registers a channel adapter by type (Telegram, Discord, Slack, Gotify, SMTP) with its configuration parameters. Each adapter validates its configuration at registration time and reports registration success or failure. Registered adapters are stored in a thread-safe adapter registry that the delivery router consults to select the appropriate adapter.
+
+- Event Routing: Accepts an event and routes it to the configured notification channels based on event type and severity. Routing rules are configured per event type, specifying which channel adapters should receive the event and whether the delivery should be immediate or batched. Events that do not match any routing rule are silently discarded.
+
+- Message Batching: Collects events into batches for batched delivery. The batching logic groups events by target channel and flushes batches when either the batch size threshold is reached or the batch age threshold expires. Immediate delivery events bypass batching and are delivered synchronously.
+
+- Rate Limiting: Enforces per-channel rate limits by tracking the number of delivery attempts per time window. When a channel adapter is rate-limited, subsequent events for that channel are queued with a delay until the rate limit window expires. The rate limit configuration is sourced from the centralized settings store and can be updated via hot-reload.
+
+- Delivery Acknowledgment: Tracks the delivery status of each event. On successful delivery, the delivery record is marked as delivered with the platform response. On delivery failure, the delivery record is marked as failed with the error detail. Failed deliveries enter the dead-letter queue.
+
+- Dead-Letter Queue: A holding area for events that have failed delivery after exhausting the configured retry attempts. Dead-lettered events are logged with full error context and can be replayed manually or automatically after a configurable delay. The dead-letter queue is stored in the persistence engine for durability.
+
+### State Flow and Lifecycle
+
+The notification engine lifecycle follows these phases:
+
+1. Initialization: The engine loads notification channel configurations from the centralized settings store, registers each configured adapter, validates adapter connectivity where possible, and starts the batching and delivery dispatch loops.
+
+2. Event Processing: Events are received from the concurrency engine and other system components. Each event is routed to the appropriate channel adapters based on routing rules. Immediate events are dispatched synchronously; batched events are collected into batches.
+
+3. Batch Dispatch: Batched events are dispatched to their target channel adapters in chronological order. The dispatch respects rate limits by queuing delayed dispatches when a channel is rate-limited. Delivery results are recorded in delivery records.
+
+4. Retry and Dead-Letter: Events that fail delivery are retried with exponential backoff up to a configured maximum. Events that exhaust retries are moved to the dead-letter queue and logged for manual intervention.
+
+5. Shutdown: During graceful shutdown, the engine flushes all pending batches, waits for in-flight deliveries to complete (up to a configured flush timeout), and records the final delivery statistics. Pending events that have not been dispatched are either delivered during the flush period or moved to the dead-letter queue.
+
+### Error Handling and Recovery Strategy
+
+- Adapter connectivity failures: When a channel adapter reports a connectivity error (network unreachable, authentication failure), the adapter is marked as unavailable and all subsequent events for that adapter are queued for retry. The adapter is retried after a configurable interval. Connectivity failures do not affect delivery to other adapters.
+
+- Rate limit errors: When a channel adapter returns a rate limit response, subsequent events for that adapter are delayed until the rate limit window expires. The engine tracks rate limit headers from platform responses to handle platform-specific rate limit behavior.
+
+- Delivery timeouts: When a delivery request exceeds the configured timeout, the delivery is marked as failed and enters the retry cycle. The timeout is configured per adapter type to accommodate platform-specific response time characteristics.
+
+- Dead-letter exhaustion: The dead-letter queue is stored in the persistence engine and is periodically reviewed by a maintenance routine. Events in the dead-letter queue older than a configurable retention period are purged after logging.
+
+### Integration Points
+
+- Module E (Concurrency Engine): Receives operational events from the concurrency engine for job completions, failures, and system lifecycle events. The concurrency engine creates notification events with job context.
+
+- Module A (Persistence Engine): Stores delivery records and the dead-letter queue. Reads notification channel configurations from system settings.
+
+- Cross-Cutting (Configuration Management): Loads notification channel configurations, routing rules, rate limits, and retry policies from centralized settings. Supports hot-reload of notification configuration.
+
+- Cross-Cutting (Observability): Publishes delivery success and failure rates, batch sizes, delivery latency, and channel adapter health metrics.
+
+### Trade-offs and Design Justification
+
+The pluggable adapter architecture provides extensibility without modifying core notification logic, allowing new notification platforms to be added by implementing a single adapter interface. Batching is used to reduce the number of API calls to notification platforms, which reduces both network overhead and the risk of rate limit violations. Per-channel rate limiting ensures that one slow or rate-limited channel does not block deliveries to other channels. The dead-letter queue provides a safety net for delivery failures, ensuring that no notification is silently lost. Storing delivery records in the persistence engine provides auditability at the cost of additional database write overhead, which is considered acceptable given that delivery tracking is a critical operational requirement.
+
+---
+
+## Module G: CI/CD Pipeline - GitHub Actions
+
+### Primary Responsibility
+
+Define and configure a GitHub Actions continuous integration and continuous deployment pipeline for building, testing, signing, and releasing MediaCruncher across multiple platforms and architectures. The pipeline produces cryptographically signed build artifacts, publishes them as GitHub Releases, and enforces quality gates through matrix builds and status checks.
+
+### Core Data Structures
+
+- Build Matrix: A structured configuration of build targets, combining operating systems (Linux, Windows, macOS) with CPU architectures (x86_64, ARM64). Each matrix combination specifies the target OS, architecture, Go version, and platform-specific build flags. The matrix is generated dynamically based on supported platform combinations.
+
+- Build Artifact: The output of a successful build, including the compiled binary, associated checksums, cryptographic signatures, and platform identification metadata. Artifacts are uploaded as GitHub Actions artifacts during the build workflow and published as GitHub Release assets during the release workflow.
+
+- Semantic Version Tag: A version string following semantic versioning conventions (major.minor.patch) with optional pre-release and build metadata. Version tags are created during the release process and are used to name GitHub Releases and to scope the changelog included in release notes.
+
+- Release Draft: A pre-published GitHub Release containing the build artifacts for all platforms, release notes generated from commit history since the previous release, cryptographic signature verification instructions, and download links for each platform-architecture combination.
+
+### Key Interface Contracts
+
+- Matrix Build Strategy: Defines the build matrix configuration specifying all supported operating system and architecture combinations. Each matrix job runs in an isolated GitHub Actions runner environment, checks out the repository source code, caches Go module dependencies, runs the test suite, and builds the platform-specific binary. Build jobs are parametrized by operating system and architecture.
+
+- Artifact Generation: After a successful build, each matrix job produces a platform-specific binary with embedded version information (major version, minor version, patch version, commit hash, build timestamp). The artifact includes the binary, a SHA-256 checksum file, and a detached cryptographic signature file.
+
+- Cryptographic Signing: After all matrix build jobs complete successfully, a signing job downloads all platform artifacts, verifies their checksums, signs each binary with an ECDSA private key, and uploads the signed artifacts as workflow artifacts. The signing key is sourced from encrypted repository secrets.
+
+- Semantic Version Tagging: During the release workflow, a version job computes the next semantic version based on the previous release tag and generates a version file. A tag job creates the annotated git tag for the release and pushes it to the repository. The version computation follows semantic versioning conventions with automatic patch increment for non-breaking changes.
+
+- GitHub Release Publishing: After successful builds and signing, a release job creates a draft GitHub Release with the generated version tag, includes release notes compiled from commit messages since the previous release, attaches all signed artifacts for each platform-architecture combination, and includes download instructions and signature verification steps in the release body.
+
+- Artifact Caching: GitHub Actions caching is used to cache Go module dependencies between workflow runs, significantly reducing build times for successive runs on the same or related branches. The cache key is derived from the lock file hash to ensure cache validity.
+
+- Artifact Retention: Build artifacts uploaded as GitHub Actions workflow artifacts are retained for a configurable number of days (default thirty days). GitHub Release assets are retained indefinitely as part of the release history.
+
+### State Flow and Lifecycle
+
+The CI/CD pipeline lifecycle for a GitHub Actions workflow follows these phases:
+
+1. Trigger: The workflow is triggered by a push event (for build validation on all branches) or a release event (for release publishing on tagged commits). Push triggers run the full build matrix and test suite. Release triggers run the build matrix, signing, and release publishing sequence.
+
+2. Matrix Build: Each matrix combination runs as an independent GitHub Actions job. Jobs run in parallel when possible and share the repository checkout. Each job validates the build environment, installs dependencies, runs tests, and produces a platform-specific binary artifact.
+
+3. Artifact Verification: After all matrix builds complete, a verification job downloads all artifacts and runs a cross-platform validation suite. The validation suite checks binary executability, version string correctness, and platform-specific behavior.
+
+4. Signing: The signing job downloads verified artifacts, signs each binary, and uploads signed artifacts. Signing failure causes the release workflow to abort, with the unsigned artifacts preserved for debugging.
+
+5. Release Publishing: The release job creates the GitHub Release with all signed artifacts, release notes, and verification instructions. The release is published as a draft for review before final publication.
+
+### Error Handling and Recovery Strategy
+
+- Build failures: A failure in any matrix job marks the workflow run as failed. Individual matrix failures do not block other matrix jobs from completing, allowing the pipeline to gather maximum diagnostic information about which platforms are affected.
+
+- Signing failures: Signing is a critical security step. If signing fails, the release workflow is aborted and the failure is reported as a high-severity event. The release is not published. The signing key and environment are inspected before retrying.
+
+- Test failures: Test failures in the matrix build stage block the release workflow. The failing platform-architecture combination is reported with test output and failure details. The pipeline does not proceed to signing or release when tests fail.
+
+- Release conflicts: If a release with the target version tag already exists, the release job aborts with a conflict error. The pipeline requires manual resolution of the version conflict before proceeding.
+
+### Integration Points
+
+- Module H (CI/CD Pipeline - GitLab CI/CD): Provides a parallel CI/CD pipeline for GitLab CI/CD. The pipeline designs in Modules G and H are coordinated to maintain feature parity and consistent build outputs across platforms.
+
+- Cross-Cutting (Configuration Management): Reads build configuration, signing key references, version computation rules, and artifact retention settings from centralized configuration.
+
+- Cross-Cutting (Observability): Publishes build duration, success rates by platform, artifact size metrics, and release event metrics.
+
+### Trade-offs and Design Justification
+
+GitHub Actions was selected as the primary CI/CD platform for its native GitHub integration, which provides seamless release publishing, artifact hosting, and workflow triggering without external tooling. The matrix build strategy ensures comprehensive platform coverage while keeping individual build jobs isolated for reliable failure diagnosis. Cryptographic signing is performed within the CI/CD pipeline using GitHub Actions secrets, keeping signing keys out of the repository while allowing automated release workflows. Draft release publishing enables human review before assets are publicly available, providing a safety net for release errors. The separation of the build matrix (push trigger) and release workflow (release trigger) enables rapid build validation on every commit while maintaining a controlled release process.
+
+---
+
+## Module H: CI/CD Pipeline - GitLab CI/CD
+
+### Primary Responsibility
+
+Define and configure a GitLab CI/CD continuous integration and continuous deployment pipeline that mirrors the functionality of Module G (GitHub Actions) but leverages GitLab-specific features including runner groups, CI/CD variables, the GitLab Packages registry, pipeline variables, and approval gates. The pipeline provides an alternative CI/CD platform for deployments where GitHub Actions is not available or where GitLab-specific features are preferred.
+
+### Core Data Structures
+
+- Pipeline Matrix: A structured configuration parallel to the build matrix in Module G, defining the same operating system and architecture combinations but implemented using GitLab CI/CD job definitions and rules. The matrix maps to GitLab CI/CD stages and job definitions with GitLab-specific syntax and features.
+
+- Runner Configuration: GitLab-specific runner assignments and constraints, including runner groups, runner tags, runner concurrency limits, and runner environment variables. Runners are configured to match the target platform of each matrix job (Linux runners for Linux builds, Windows runners for Windows builds, macOS runners for macOS builds).
+
+- Pipeline Variable Set: A collection of environment variables scoped to specific pipeline stages, including build configuration variables, platform-specific flags, signing configuration, and test parameters. Variables are sourced from GitLab CI/CD variables (project-level or group-level) and pipeline-level overrides.
+
+- Package Registry Asset: Build artifacts published to the GitLab Packages and Registries feature, which provides versioned artifact storage integrated with the GitLab project. Package registry assets are versioned with semantic version tags and are accessible via the GitLab package API.
+
+### Key Interface Contracts
+
+- Pipeline Stage Definition: Defines GitLab CI/CD pipeline stages in the correct execution order: validate, build, test, verify, sign, and release. Each stage contains one or more jobs that run in the specified order. Jobs within a stage can run in parallel when runner capacity is available.
+
+- Matrix Job Definition: Defines matrix jobs using GitLab CI/CD dynamic job generation or static job definitions for each platform-architecture combination. Each matrix job checks out the repository, installs dependencies, runs tests, and builds the platform-specific binary. Matrix jobs are parametrized by platform and architecture using GitLab CI/CD variables.
+
+- Runner Assignment: Assigns matrix jobs to runners based on runner tags and runner groups. Linux x86_64 jobs are assigned to Linux x86_64 runners, Windows jobs to Windows runners, and so on. The runner assignment ensures platform-specific builds run on the correct operating system environment.
+
+- Package Upload: After successful builds, artifacts are uploaded to the GitLab Packages registry with semantic version metadata. Package uploads are versioned, auditable, and accessible through the GitLab package API for downstream consumption.
+
+- Approval Gates: Release stage jobs include approval gate requirements that require manual approval before the release can proceed. Approval gates are configured at the GitLab project level and can be assigned to specific maintainer roles. The approval gate provides a human checkpoint before release assets are published.
+
+- Retry Policy: Build and test jobs include configurable retry policies with a maximum retry count and retry delay. Transient failures in matrix jobs are automatically retried up to the configured limit before the pipeline marks the job as failed.
+
+- Pipeline Variables: Pipeline-level variables override project-level CI/CD variables for the current pipeline execution. Variables control the build version, target platforms, signing configuration, and test parameters. Variables are sourced from pipeline triggers, manual pipeline runs, or scheduled pipeline configurations.
+
+### State Flow and Lifecycle
+
+The GitLab CI/CD pipeline lifecycle follows these phases:
+
+1. Trigger: The pipeline is triggered by a push to the repository (continuous integration), a tag creation (release pipeline), or a manual pipeline run. Push triggers run the validate, build, test, and verify stages. Tag triggers run the full pipeline including signing and release.
+
+2. Matrix Build: Each platform-architecture combination runs as an independent GitLab CI/CD job within the build stage. Jobs are assigned to runners based on runner tags. All matrix jobs run in parallel within the build stage.
+
+3. Verification: After the build stage completes, the verify stage runs cross-platform validation against all produced artifacts, verifying executability, version strings, and platform-specific behavior.
+
+4. Signing: The sign stage downloads all verified artifacts, signs each binary, and uploads signed artifacts to the GitLab Packages registry.
+
+5. Release: The release stage creates the GitLab release with all signed artifacts, with an approval gate requiring manual maintainer approval before final publication. Release notes are generated from commit history and included in the release.
+
+### Error Handling and Recovery Strategy
+
+- Pipeline failures: A failure in any pipeline stage blocks subsequent stages. Individual matrix job failures do not block other matrix jobs in the same stage, allowing maximum diagnostic information to be gathered.
+
+- Approval gate failures: If the approval gate is not approved within a configurable timeout, the release pipeline is paused and a notification is sent to the designated approvers. The pipeline remains in a paused state until approval or explicit rejection.
+
+- Runner capacity exhaustion: If no runners are available for a required platform, the pipeline job is queued indefinitely until a runner becomes available. The pipeline configuration includes a job timeout that eventually cancels the job if runners are unavailable for an extended period.
+
+- Package registry conflicts: If a package version already exists in the GitLab Packages registry, the upload job aborts with a conflict error. The pipeline requires manual resolution before proceeding.
+
+### Integration Points
+
+- Module G (CI/CD Pipeline - GitHub Actions): Provides a parallel CI/CD implementation for GitHub Actions. Both modules maintain feature parity and produce the same build outputs, with platform-specific differences only in CI/CD platform integration details.
+
+- Module F (Notification Engine): Receives pipeline status notifications (build success, build failure, release published, release failed) for delivery to configured notification channels.
+
+- Cross-Cutting (Configuration Management): Reads pipeline configuration, runner assignments, package registry settings, and approval gate configurations from centralized configuration.
+
+- Cross-Cutting (Observability): Publishes pipeline duration, stage completion rates, runner utilization, and release event metrics.
+
+### Trade-offs and Design Justification
+
+GitLab CI/CD was designed as a parallel alternative to GitHub Actions rather than a replacement, providing platform choice without duplicating all CI/CD logic. The pipeline stage structure mirrors GitHub Actions' workflow job structure, maintaining conceptual consistency across both implementations. GitLab-specific features (runner groups, CI/CD variables, approval gates, packages registry) are leveraged where they provide unique value compared to the GitHub implementation. The approval gate provides a human release checkpoint that is more flexible than GitHub's release draft workflow, allowing conditional approval requirements based on project configuration. Package registry integration provides versioned artifact storage within the GitLab project, eliminating the need for external artifact hosting.
+
