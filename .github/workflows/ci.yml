@@ -52,7 +52,7 @@ jobs:
       - name: Build binary
         id: build
         env:
-          GOOS: ${{ runner.os == 'macOS' && 'darwin' || toLower(runner.os) }}
+          GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
           GOARCH: ${{ matrix.arch }}
         run: |
           $buildDir = "dist"
@@ -83,7 +83,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mediacruncher-${{ runner.os == 'macOS' && 'Darwin' || toLower(runner.os) }}-${{ matrix.arch }}
+          name: mediacruncher-${{ runner.os == 'macOS' && 'Darwin' || (runner.os == 'Windows' && 'Windows' || 'Linux') }}-${{ matrix.arch }}
           path: |
             dist/mediacruncher*
             dist/mediacruncher.exe
