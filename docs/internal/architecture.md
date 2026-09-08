@@ -590,3 +590,153 @@ The GitLab CI/CD pipeline lifecycle follows these phases:
 
 GitLab CI/CD was designed as a parallel alternative to GitHub Actions rather than a replacement, providing platform choice without duplicating all CI/CD logic. The pipeline stage structure mirrors GitHub Actions' workflow job structure, maintaining conceptual consistency across both implementations. GitLab-specific features (runner groups, CI/CD variables, approval gates, packages registry) are leveraged where they provide unique value compared to the GitHub implementation. The approval gate provides a human release checkpoint that is more flexible than GitHub's release draft workflow, allowing conditional approval requirements based on project configuration. Package registry integration provides versioned artifact storage within the GitLab project, eliminating the need for external artifact hosting.
 
+---
+
+## Cross-Cutting Concern: Configuration Management
+
+### Primary Responsibility
+
+Provide a unified, hierarchical configuration loading mechanism that consolidates settings from multiple sources into a single authoritative configuration store, with validation, hot-reload capability, and centralized access for all modules.
+
+### Design
+
+Configuration values are loaded in a defined priority order: built-in defaults are applied first, then overridden by environment variables, then by command-line flags, and finally by a configuration file on disk. The last writer wins within each priority layer. Values are validated against a schema defined at startup; invalid values cause a startup failure with a detailed error listing each invalid field and its expected type and constraints. The configuration store is immutable once loaded at startup and is read through a thread-safe accessor that returns copies of configuration values.
+
+Hot-reload capability allows specific configuration sections (notification channels, rate limits, scan paths, worker pool sizing) to be reloaded without restarting the application. When a configuration file change is detected on disk, the engine loads the new configuration, validates it, and atomically replaces the active configuration. Modules that depend on hot-reloadable settings subscribe to configuration change notifications and react to updates (e.g., the concurrency engine adjusts its worker pool size, the notification engine reloads channel adapters). Settings that cannot be hot-reloaded (database connection string, log level during initialization) require a full application restart.
+
+All modules access configuration through a shared configuration accessor interface that provides typed getters for each configuration parameter. The accessor returns a default value when a configuration key is unset, ensuring that modules never encounter nil or missing configuration. Configuration changes are logged to the audit trail with the changed keys and old/new values.
+
+### Integration
+
+All modules read their configuration from the centralized configuration accessor. The configuration store is a dependency injected into each module at construction time. Module-specific configuration sections are namespaced within the overall configuration hierarchy (e.g., persistence section for Module A, filesystem section for Module B, concurrency section for Module E).
+
+---
+
+## Cross-Cutting Concern: Observability
+
+### Primary Responsibility
+
+Provide structured logging, metrics collection, health check reporting, and audit trail integration that apply across all modules, enabling operational visibility, performance monitoring, and debugging support.
+
+### Design
+
+Structured logging is the primary observational mechanism, with each module emitting log entries at defined severity levels (debug, info, warning, error, critical). Log entries include a structured context block containing the module name, operation identifier, relevant identifiers (job ID, file path, worker ID), and a human-readable message. Log entries are written to stdout in a structured format (JSON) that can be consumed by log aggregation systems. The log level is configurable and hot-reloadable.
+
+Metrics are collected through a centralized metrics registry that exposes counters, gauges, and histograms. Specific metrics collected include:
+
+- Queue depth: current number of pending, processing, and completed queue entries (reported by Module E and persisted by Module A).
+- Worker utilization: percentage of workers actively processing versus idle (reported by Module E).
+- Success and failure rates: ratio of successful to failed operations per module per time window (reported by each module).
+- VMAF scores: distribution of quality verification scores for transcoded files (reported by Module D).
+- Scan progress: files discovered, files accepted, files skipped, scan duration (reported by Module B).
+- Evaluation results: decision distribution (transcode, stream copy, skip, flag for review counts) (reported by Module C).
+- Notification delivery: delivery success and failure rates, batch sizes, delivery latency (reported by Module F).
+- Build metrics: build duration, success rates by platform, artifact sizes (reported by Modules G and H).
+
+Metrics are exported in a standard format compatible with Prometheus and are exposed on a local HTTP endpoint for scraping. A health check endpoint reports the overall system health status, including the state of each module (healthy, degraded, unhealthy), queue depth, and active worker count.
+
+The audit trail, implemented by Module A's audit log, captures significant operational events across all modules. Events are appended with structured metadata enabling post-incident investigation and compliance reporting.
+
+---
+
+## Cross-Cutting Concern: Graceful Shutdown
+
+### Primary Responsibility
+
+Define and enforce a deterministic shutdown sequence that ensures all in-progress work is completed or safely rolled back, persistent state is flushed, and external connections are cleanly terminated before the application exits.
+
+### Design
+
+The shutdown sequence is triggered by a signal (SIGTERM on Unix, Ctrl+C or system shutdown on Windows) and follows a strict ordered sequence:
+
+1. Signal Interception: A signal handler intercepts shutdown signals and initiates the shutdown sequence. The handler ignores subsequent signals during the shutdown process to prevent duplicate shutdown attempts. The application logs the shutdown signal and its timestamp.
+
+2. Worker Draining: The concurrency engine enters the drain phase. New task submissions are rejected. Existing workers complete their current assignments. The engine waits for all in-flight operations to complete, up to a configured drain timeout. Operations that exceed the drain timeout are cancelled via their cancellation context, and the affected jobs are requeued or marked as failed.
+
+3. State Persistence: The concurrency engine flushes all pending state changes to the persistence engine. The filesystem engine flushes any pending scan checkpoints. The notification engine flushes pending delivery records. The persistence engine commits all pending transactions synchronously.
+
+4. Connection Teardown: The persistence engine closes all database connections. The notification engine closes all adapter connections. External process handles (ffprobe, ffmpeg, VMAF) are terminated cleanly.
+
+5. Final Reporting: The observability subsystem exports final metrics and writes a shutdown summary to the audit log. The application exits with a zero exit code if shutdown completed normally, or a non-zero exit code if a timeout or error prevented clean shutdown.
+
+The shutdown sequence is designed to be idempotent: calling it multiple times (e.g., from multiple signal handlers) has no adverse effect. The shutdown coordinator tracks shutdown progress and reports the current phase, enabling diagnostics if shutdown hangs.
+
+### Integration
+
+The shutdown coordinator is a central component that all modules register with at startup. Each module registers a shutdown handler that is invoked during the appropriate phase (draining, persistence, teardown). The concurrency engine's drain phase is the longest phase and typically determines the overall shutdown duration. The persistence engine's synchronous commit during state persistence ensures that no queued work is lost on shutdown.
+
+---
+
+## Cross-Cutting Concern: Stateless Worker Design
+
+### Primary Responsibility
+
+Define the worker processing model as stateless where possible, enabling horizontal scalability through future gRPC or HTTP-based worker distribution without requiring shared mutable state between workers.
+
+### Design
+
+Each worker in the concurrency engine is stateless with respect to its processing logic: a worker receives a job, performs the required processing (evaluation or transcoding), and returns the result. The worker does not cache in-memory state about files, rules, or processing history that would tie it to a specific processing session. All persistent state is stored in the persistence engine (Module A), and all configuration is read from the centralized configuration store.
+
+Workers may maintain local caches for performance optimization (e.g., the evaluation pipeline caches the rule set in memory, the transcoder caches the hardware capability profile), but these caches are rebuildable from persistent sources without affecting processing correctness. If a worker is replaced (due to crash, scaling, or redistribution), the new worker can process any pending job without requiring state migration.
+
+Stateless worker design enables future horizontal scaling where workers run as separate processes or containers communicating through a gRPC or HTTP interface. The queue remains the single source of truth for work items, workers claim jobs through the queue interface, and results are returned through the same interface. The stateless model ensures that worker instances are interchangeable and that no single worker becomes a point of failure for specific jobs.
+
+### Integration
+
+The stateless worker model is the default assumption for all module interfaces. Modules expose stateless operation contracts: the evaluation pipeline accepts a file path and returns a decision; the transcoder accepts a transcode job and returns a result; the notification engine accepts an event and delivers it. Modules do not expose stateful operation contracts that would require workers to maintain session state. The persistence engine and configuration store are the two shared stateful services that all workers depend on, providing the single source of truth for persistent data and configuration.
+
+---
+
+## Integration Map
+
+This section summarizes the connectivity, data sharing, and communication patterns between all modules and cross-cutting concerns in the MediaCruncher architecture.
+
+### Module Connectivity Overview
+
+The system follows a pipeline architecture where data flows from filesystem ingestion through evaluation to transcoding, with the concurrency engine orchestrating the flow and the notification engine providing asynchronous event distribution.
+
+- Module B (Filesystem Engine) is the entry point, discovering media files and pushing them into the processing pipeline.
+- Module E (Concurrency Engine) receives discovered files from Module B and dispatches them to Module C (Evaluation Pipeline) for analysis.
+- Module C (Evaluation Pipeline) analyzes files and produces decisions that are routed back to Module E for further processing.
+- Module E dispatches transcode decisions to Module D (Transcoder) for execution.
+- Module D writes transcoding results back to Module E, which routes completion notifications to Module F (Notification Engine).
+- Module A (Persistence Engine) underlies the entire system, providing durable state for all modules.
+- Modules G (GitHub CI/CD) and H (GitLab CI/CD) operate externally to the runtime pipeline, providing build, test, signing, and release automation.
+
+### Data Sharing Patterns
+
+- Queue-based communication: Module E maintains the in-memory task queue that serves as the primary data exchange mechanism between the filesystem engine, evaluation pipeline, transcoder, and notification engine. Work items flow through the queue in a producer-consumer pattern.
+
+- Persistence-mediated communication: Modules A, C, D, and F share data through the persistence engine. Module C writes decision records that Module D reads (indirectly through the queue). Module A serves as the audit source for Module F's delivery records.
+
+- Configuration-mediated communication: All modules share configuration through the centralized configuration store. Configuration changes propagate from the store to dependent modules through the hot-reload notification mechanism.
+
+- Audit-mediated communication: The audit log in Module A serves as a shared event history that can be queried by Module F for notification routing decisions and by external monitoring tools for system diagnostics.
+
+### Communication Flow Sequence
+
+1. Filesystem discovery (Module B) pushes files to the concurrency engine queue (Module E).
+2. Module E dispatches files to the evaluation pipeline (Module C).
+3. Module C analyzes files and persists decisions to the persistence engine (Module A).
+4. Module E reads evaluation results and routes them: transcode decisions go to the transcoder (Module D); skip decisions are marked complete; flag-for-review decisions trigger notification events (Module F).
+5. Module D executes transcoding, verifies quality, and reports results to Module E.
+6. Module E routes transcoding results: success triggers notification events; failure triggers retry or review notifications.
+7. Module F delivers notifications to external channels based on event type and severity.
+8. All modules log operational events to the persistence engine's audit log for accountability and debugging.
+9. CI/CD pipelines (Modules G and H) build, test, sign, and release the application independently of the runtime pipeline.
+
+### Dependency Graph
+
+- Module A is depended on by: B, C, D, E, F
+- Module B is depended on by: E
+- Module C is depended on by: E, D
+- Module D is depended on by: E
+- Module E is depended on by: B, C, D, F
+- Module F is depended on by: E
+- Module G is independent (external CI/CD)
+- Module H is independent (external CI/CD)
+- Configuration Management is depended on by: all modules (A through H)
+- Observability is depended on by: all modules (A through F)
+- Graceful Shutdown coordinates: E, A, F
+- Stateless Worker Design applies to: E, C, D
+
