@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -129,15 +131,38 @@ func (a *HTTPAdapter) IsEnabled() bool {
 	return a.enabled
 }
 
+// validateURL checks that the URL is safe to use for outbound HTTP requests.
+// It rejects non-HTTPS schemes and URLs pointing to private, loopback, or link-local IPs.
+func validateURL(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q: %w", rawURL, err)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("only https URLs are allowed, got %s", parsed.Scheme)
+	}
+	host := parsed.Hostname()
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("URL points to restricted IP: %s", host)
+		}
+	}
+	return nil
+}
+
 // DoPOST sends a POST request and returns the response body.
-func (a *HTTPAdapter) DoPOST(url string, body interface{}) (*http.Response, []byte, error) {
+func (a *HTTPAdapter) DoPOST(rawURL string, body interface{}) (*http.Response, []byte, error) {
+	if err := validateURL(rawURL); err != nil {
+		return nil, nil, fmt.Errorf("URL validation failed: %w", err)
+	}
+
 	var bodyBuf bytes.Buffer
 	enc := json.NewEncoder(&bodyBuf)
 	if err := enc.Encode(body); err != nil {
 		return nil, nil, fmt.Errorf("encode request body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", url, &bodyBuf)
+	req, err := http.NewRequest("POST", rawURL, &bodyBuf)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create request: %w", err)
 	}
