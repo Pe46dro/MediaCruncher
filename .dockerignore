@@ -1,0 +1,7 @@
+.git
+dist/
+docs/
+*.db
+*.md
+!Dockerfile
+!docker-compose.yml

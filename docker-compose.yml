@@ -1,0 +1,20 @@
+services:
+  mediacruncher:
+    build:
+      context: .
+      args:
+        BUILD_VERSION: compose-local
+        BUILD_COMMIT: local
+        BUILD_TIME: "${BUILD_TIME:-00000000-000000}"
+    restart: unless-stopped
+    environment:
+      - MC_CONFIG_DIR=/app/config
+      - MC_DATABASE_PATH=/app/data/mediacruncher.db
+      - MC_LOG_LEVEL=info
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./media:/app/media:ro
+    ports:
+      - "9090:9090"
+    working_dir: /app
