@@ -159,7 +159,11 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 		}
 	}
 
-	args = append(args, "-i", job.SourcePath)
+	sanitizedSource, srcErr := sanitizePath(job.SourcePath, []string{job.StagingDir})
+	if srcErr != nil {
+		return nil, fmt.Errorf("sanitize source path: %w", srcErr)
+	}
+	args = append(args, "-i", sanitizedSource)
 
 	switch codec.Codec {
 	case "h.264":
@@ -220,7 +224,11 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 		args = append(args, "-c:a", "copy")
 	}
 
-	args = append(args, outputPath)
+	sanitizedOutput, outErr := sanitizePath(outputPath, []string{job.StagingDir})
+	if outErr != nil {
+		return nil, fmt.Errorf("sanitize output path: %w", outErr)
+	}
+	args = append(args, sanitizedOutput)
 
 	return exec.CommandContext(ctx, e.BinaryPath, args...), nil
 }

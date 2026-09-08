@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -94,12 +96,25 @@ func Probe(ctx context.Context, path string, cfg ProbeConfig) *ProbeResult {
 	}
 
 	start := time.Now()
+
+	cleanPath := filepath.Clean(path)
+	if !filepath.IsAbs(cleanPath) {
+		abs, err := filepath.Abs(cleanPath)
+		if err != nil {
+			return &ProbeResult{Error: fmt.Sprintf("resolve path: %v", err), ProbeTime: time.Since(start)}
+		}
+		cleanPath = abs
+	}
+	if strings.HasPrefix(cleanPath, "-") {
+		return &ProbeResult{Error: fmt.Sprintf("path appears to be a flag: %s", path), ProbeTime: time.Since(start)}
+	}
+
 	args := []string{
 		"-v", "quiet",
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
-		path,
+		cleanPath,
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.BinaryPath, args...)

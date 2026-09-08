@@ -53,13 +53,19 @@ func (d *CorruptionDetector) Check(ctx context.Context, filePath string) *Corrup
 		return result
 	}
 
+	sanitizedPath, pathErr := sanitizePath(filePath, nil)
+	if pathErr != nil {
+		result.Error = fmt.Sprintf("sanitize path: %v", pathErr)
+		return result
+	}
+
 	cmd := exec.CommandContext(ctx,
 		d.BinaryPath,
 		"-v", "error",
 		"-print_format", "json",
 		"-show_format",
 		"-show_streams",
-		filePath,
+		sanitizedPath,
 	)
 
 	var stdout bytes.Buffer

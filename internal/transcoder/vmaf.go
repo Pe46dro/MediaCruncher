@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"time"
@@ -68,10 +69,21 @@ func (v *VMAFVerifier) Verify(ctx context.Context, original, transcoded string) 
 		v.config.BinaryPath = "vmaf"
 	}
 
+	sanitizedOriginal, origErr := sanitizePath(original, nil)
+	if origErr != nil {
+		result.Error = fmt.Sprintf("sanitize original path: %v", origErr)
+		return result
+	}
+	sanitizedTranscoded, transcErr := sanitizePath(transcoded, nil)
+	if transcErr != nil {
+		result.Error = fmt.Sprintf("sanitize transcoded path: %v", transcErr)
+		return result
+	}
+
 	cmd := exec.CommandContext(ctx,
 		v.config.BinaryPath,
-		original,
-		transcoded,
+		sanitizedOriginal,
+		sanitizedTranscoded,
 		"--json",
 		"--log-filename", "-",
 		"--model", v.config.Model,
