@@ -8,7 +8,7 @@ This document provides a production-grade, implementation-ready architectural sp
 
 ### Primary Responsibility
 
-Provide durable, transactional storage for the application's queue entries, job metadata, system settings, and audit logs. The persistence engine serves as the single source of truth for all operational state, enabling recovery across restarts and supporting concurrent read-write access from the concurrency engine. It must operate without any C bindings or CGO dependencies, relying exclusively on a pure-Go database driver to maintain build portability across platforms.
+Provide durable, transactional storage for the application's queue entries, job metadata, system settings, and audit logs. The persistence engine serves as the single source of truth for all operational state, enabling recovery across restarts and supporting concurrent read-write access from the concurrency engine. It must operate without any C bindings or CGO dependencies, relying exclusively on a native database driver to maintain build portability across platforms.
 
 ### Core Data Structures
 
@@ -76,7 +76,7 @@ The persistence engine employs a tiered error handling approach:
 
 ### Trade-offs and Design Justification
 
-SQLite was selected as the persistence engine over alternatives such as PostgreSQL or embedded key-value stores because the application operates as a single-process daemon with no need for multi-node concurrency or external database hosting. The choice delivers a self-contained deployment with zero infrastructure dependencies. The zero-CGO constraint is satisfied by using a pure-Go SQLite driver, which trades some raw write throughput for cross-platform build simplicity. For the expected workload of hundreds to low thousands of files per library scan, the throughput difference is imperceptible. The trade-off of SQLite's single-writer limitation is acceptable because the concurrency engine serializes all write operations through the claimed-worker model, eliminating write contention by design. Write-ahead logging is enabled for durability at the cost of a modest performance penalty on high-frequency small writes, which is mitigated by batching metadata updates within single transactions.
+SQLite was selected as the persistence engine over alternatives such as PostgreSQL or embedded key-value stores because the application operates as a single-process daemon with no need for multi-node concurrency or external database hosting. The choice delivers a self-contained deployment with zero infrastructure dependencies. The zero-CGO constraint is satisfied by using a native SQLite driver, which trades some raw write throughput for cross-platform build simplicity. For the expected workload of hundreds to low thousands of files per library scan, the throughput difference is imperceptible. The trade-off of SQLite's single-writer limitation is acceptable because the concurrency engine serializes all write operations through the claimed-worker model, eliminating write contention by design. Write-ahead logging is enabled for durability at the cost of a modest performance penalty on high-frequency small writes, which is mitigated by batching metadata updates within single transactions.
 
 ---
 
@@ -220,7 +220,7 @@ The evaluation pipeline lifecycle for each file follows these phases:
 
 ### Trade-offs and Design Justification
 
-The decoupling of analysis, normalization, and rule matching into separate stages provides clarity and testability. ffprobe is invoked as an external process rather than through library bindings to avoid CGO dependencies and to isolate potential crashes or memory issues in the external tool from the Go runtime. The in-memory rule set cache avoids repeated file I/O on rule set updates, which typically occur infrequently. Deferring transcoding decisions to the concurrency engine (rather than having the evaluation pipeline dispatch transcoding directly) provides a clean separation between analysis and execution, allowing the concurrency engine to apply backpressure and priority-based scheduling on top of evaluation outcomes.
+The decoupling of analysis, normalization, and rule matching into separate stages provides clarity and testability. ffprobe is invoked as an external process rather than through library bindings to avoid CGO dependencies and to isolate potential crashes or memory issues in the external tool from the application runtime. The in-memory rule set cache avoids repeated file I/O on rule set updates, which typically occur infrequently. Deferring transcoding decisions to the concurrency engine (rather than having the evaluation pipeline dispatch transcoding directly) provides a clean separation between analysis and execution, allowing the concurrency engine to apply backpressure and priority-based scheduling on top of evaluation outcomes.
 
 ---
 
@@ -478,7 +478,7 @@ Define and configure a GitHub Actions continuous integration and continuous depl
 
 - GitHub Release Publishing: After successful builds and signing, a release job creates a draft GitHub Release with the generated version tag, includes release notes compiled from commit messages since the previous release, attaches all signed artifacts for each platform-architecture combination, and includes download instructions and signature verification steps in the release body.
 
-- Artifact Caching: GitHub Actions caching is used to cache Go module dependencies between workflow runs, significantly reducing build times for successive runs on the same or related branches. The cache key is derived from the lock file hash to ensure cache validity.
+- Artifact Caching: GitHub Actions caching is used to cache package dependencies between workflow runs, significantly reducing build times for successive runs on the same or related branches. The cache key is derived from the lock file hash to ensure cache validity.
 
 - Artifact Retention: Build artifacts uploaded as GitHub Actions workflow artifacts are retained for a configurable number of days (default thirty days). GitHub Release assets are retained indefinitely as part of the release history.
 
