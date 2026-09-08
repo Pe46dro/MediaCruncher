@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -129,11 +130,18 @@ func (e *Engine) Fail(ctx context.Context, entryID int64, reason string) error {
 		}
 
 		// Append audit log
+		payload, marshalErr := json.Marshal(map[string]interface{}{
+			"event":  "job_failed",
+			"entry_id": entryID,
+			"reason": reason,
+		})
+		if marshalErr != nil {
+			return fmt.Errorf("marshal failure audit payload: %w", marshalErr)
+		}
 		_, err = tx.ExecContext(ctx,
 			`INSERT INTO audit_logs (sequence, timestamp, event_type, severity, payload)
-			 VALUES ((SELECT COALESCE(MAX(sequence),0)+1 FROM audit_logs), datetime('now'), 'job_failed', 'error',
-			 '{"event":"job_failed","entry_id":%d,"reason":"%s"})`,
-			entryID, escapeJSON(reason),
+			 VALUES ((SELECT COALESCE(MAX(sequence),0)+1 FROM audit_logs), datetime('now'), 'job_failed', 'error', ?)`,
+			string(payload),
 		)
 		return err
 	})

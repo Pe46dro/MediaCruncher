@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -210,11 +211,19 @@ func (e *Engine) RecoverProcessing(ctx context.Context) (int, error) {
 			}
 
 			// Append audit log for recovery
+			payload, marshalErr := json.Marshal(map[string]interface{}{
+				"event":       "recovery_requeue",
+				"entry_id":    id,
+				"path":        path,
+				"retry_count": newRetry,
+			})
+			if marshalErr != nil {
+				return fmt.Errorf("marshal recovery audit payload: %w", marshalErr)
+			}
 			_, err = tx.ExecContext(ctx,
 				`INSERT INTO audit_logs (sequence, timestamp, event_type, severity, payload)
-				 VALUES ((SELECT COALESCE(MAX(sequence),0)+1 FROM audit_logs), datetime('now'), 'recovery', 'info',
-				 '{"event":"recovery_requeue","entry_id":%d,"path":"%s","retry_count":%d})`,
-				id, escapeJSON(path), newRetry,
+				 VALUES ((SELECT COALESCE(MAX(sequence),0)+1 FROM audit_logs), datetime('now'), 'recovery', 'info', ?)`,
+				string(payload),
 			)
 			if err != nil {
 				e.logger.WithFields(observability.Field{Key: "entry_id", Value: id}).Warn("failed to write recovery audit log")
@@ -253,40 +262,4 @@ func (e *Engine) Validate() error {
 	return nil
 }
 
-// escapeJSON escapes a string for safe embedding in a JSON payload string within SQL.
-func escapeJSON(s string) string {
-	s = replaceAll(s, `\`, `\\`)
-	s = replaceAll(s, `"`, `\"`)
-	s = replaceAll(s, "\n", `\n`)
-	s = replaceAll(s, "\r", `\r`)
-	s = replaceAll(s, "\t", `\t`)
-	return s
-}
 
-func replaceAll(s, old, new string) string {
-	result := make([]byte, 0, len(s))
-	i := 0
-	for {
-		idx := findSubstring(s[i:], old)
-		if idx < 0 {
-			result = append(result, s[i:]...)
-			break
-		}
-		result = append(result, s[i:i+idx]...)
-		result = append(result, new...)
-		i = i + idx + len(old)
-	}
-	return string(result)
-}
-
-func findSubstring(s, sub string) int {
-	if len(sub) == 0 {
-		return 0
-	}
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return i
-		}
-	}
-	return -1
-}
