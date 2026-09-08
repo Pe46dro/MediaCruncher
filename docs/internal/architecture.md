@@ -28,7 +28,7 @@ The persistence engine exposes a connection-oriented interface with the followin
 
 - Connection Lifecycle: Opens a database connection from a provided file path, executes a controlled schema migration if needed, and validates the connection through a lightweight ping operation. Closing the connection drains pending transactions, releases the database file lock, and returns a cleanup error if any operation was left incomplete.
 
-- Transaction Boundary: All write operations execute within explicitly scoped transactions that follow an all-or-nothing guarantee. The interface provides atomic begin-commit and rollback semantics, with automatic rollback triggered by panic recovery within the transaction scope.
+- Transaction Boundary: All write operations execute within explicitly scoped transactions that follow an all-or-nothing guarantee. The interface provides atomic begin-commit and rollback semantics, with automatic rollback triggered by unhandled error recovery within the transaction scope.
 
 - Queue Operations: Enqueue a new job with state initialization and timestamp setting. Claim the highest-priority available job for a given worker, atomically transitioning it from pending to processing state while recording the worker identifier. Complete or fail a job by transitioning it to the target state with metadata linkage. Requeue a job with incremented retry count and backoff delay when transient failures occur.
 
@@ -106,7 +106,7 @@ The filesystem engine exposes a scanning interface with these operational bounda
 
 - Deduplication: Before emitting each File Record, the engine checks the in-memory hash index. If a file with an identical first-and-last-megabyte hash already exists, a deduplication warning is attached to the record and the file is either skipped or flagged for review based on the deduplication policy configuration. Full cryptographic hash comparison is deferred to the evaluation pipeline to avoid unnecessary I/O on large files.
 
-- Backpressure-Aware Ingestion: Pushes File Records into the ingestion buffer. When the buffer is full, the discovery goroutine blocks until space is available, creating a natural backpressure signal that slows file discovery to match the downstream processing capacity. When the processing queue rejects an item due to capacity limits, the buffer accumulates, and discovery eventually pauses. An optional overflow policy determines whether blocked items are dropped, buffered with an expanded capacity, or cause the scan to halt entirely.
+- Backpressure-Aware Ingestion: Pushes File Records into the ingestion buffer. When the buffer is full, the discovery process blocks until space is available, creating a natural backpressure signal that slows file discovery to match the downstream processing capacity. When the processing queue rejects an item due to capacity limits, the buffer accumulates, and discovery eventually pauses. An optional overflow policy determines whether blocked items are dropped, buffered with an expanded capacity, or cause the scan to halt entirely.
 
 - Error Handling During Traversal: When a permission denied or access denied error is encountered during directory traversal, the engine logs the error, records it in the scan report, and continues with sibling directories. Retry attempts are made once after a brief delay before recording the error as permanent. Timeout errors on file stat operations cause the file to be skipped with a warning.
 
@@ -122,7 +122,7 @@ The filesystem engine lifecycle follows these phases:
 
 4. Report: Generates a scan report containing total files discovered, files accepted, files skipped by type filter, files flagged as duplicates, directories skipped due to permission errors, and total scan duration. The report is published to the observability subsystem for monitoring.
 
-5. Cleanup: Releases all worker goroutines, closes file handles, and drains the ingestion buffer. If the engine was interrupted during scanning, any remaining items in the buffer are flushed before cleanup.
+5. Cleanup: Releases all worker processes, closes file handles, and drains the ingestion buffer. If the engine was interrupted during scanning, any remaining items in the buffer are flushed before cleanup.
 
 ### Error Handling and Recovery Strategy
 
