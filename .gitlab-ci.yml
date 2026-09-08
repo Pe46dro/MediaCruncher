@@ -264,7 +264,7 @@ docker-build:
   tags:
     - linux
   script:
-    - docker build -t mediacruncher:$CI_COMMIT_SHORT_SHA --build-arg BUILD_VERSION=$CI_COMMIT_TAG --build-arg BUILD_COMMIT=$CI_COMMIT_SHORT_SHA --build-arg BUILD_TIME=$(date +%Y%m%d-%H%M%S) .
+    - docker build -t mediacruncher:$CI_COMMIT_SHORT_SHA --build-arg BUILD_VERSION=${CI_COMMIT_TAG:-$CI_COMMIT_BRANCH} --build-arg BUILD_COMMIT=$CI_COMMIT_SHORT_SHA --build-arg BUILD_TIME=$(date +%Y%m%d-%H%M%S) .
     - docker tag mediacruncher:$CI_COMMIT_SHORT_SHA mediacruncher:local
     - |
       if [ -n "$DOCKER_REGISTRY" ] && [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then

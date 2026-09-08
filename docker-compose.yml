@@ -5,7 +5,7 @@ services:
       args:
         BUILD_VERSION: compose-local
         BUILD_COMMIT: local
-        BUILD_TIME: "${BUILD_TIME:-00000000-000000}"
+        BUILD_TIME: "00000000-000000"
     restart: unless-stopped
     environment:
       - MC_CONFIG_DIR=/app/config
