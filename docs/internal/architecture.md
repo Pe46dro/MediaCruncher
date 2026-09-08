@@ -250,7 +250,7 @@ Execute media transcoding operations based on decisions from the evaluation pipe
 
 - VMAF Verification: After successful encoding, runs VMAF quality verification comparing the original and transcoded files. The verification process accepts the original file path, transcoded file path, and a quality threshold value. It returns a verification result with the computed score and a pass-fail determination.
 
-- File Management: Manages temporary staging files throughout the transcoding lifecycle. On success, moves the staged output to the final output location. On failure, cleans up all temporary files. If a failure occurs during the move operation, the staged file is preserved for inspection and the job is marked for manual review.
+- File Management: Manages temporary staging files throughout the transcoding lifecycle with idempotent operations: creating a staging directory when needed, overwriting existing staged files with the same job identifier, and cleaning up on failure. On success, moves the staged output to the final output location. On failure, cleans up all temporary files. If a failure occurs during the move operation, the staged file is preserved for inspection and the job is marked for manual review.
 
 - Corruption Detection: Validates the transcoded output file by attempting to open it with ffprobe and verify stream integrity. If the file is corrupted or unreadable, the job fails and the transcoder attempts to re-encode with software encoding as a recovery attempt.
 
@@ -258,7 +258,7 @@ Execute media transcoding operations based on decisions from the evaluation pipe
 
 The transcoder lifecycle for each job follows these phases:
 
-1. Preparation: The transcoder receives a transcode job from the concurrency engine. It validates the source file exists and is readable, checks the target output location for conflicts, and allocates a staging directory for the encoding output.
+1. Preparation: The transcoder receives a transcode job from the concurrency engine with a cancellation context that can be aborted if the worker is draining. It validates the source file exists and is readable, checks the target output location for conflicts, and allocates a staging directory for the encoding output.
 
 2. Hardware Selection: The transcoder consults the hardware capability map and negotiates the codec and acceleration method based on the encoding preset. If hardware encoding is selected, the transcoder verifies that the GPU is available and not in a thermal throttled state.
 
