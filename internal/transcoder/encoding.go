@@ -159,7 +159,7 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 		}
 	}
 
-	sanitizedSource, srcErr := sanitizePath(job.SourcePath, []string{job.StagingDir})
+	sanitizedSource, srcErr := sanitizePath(job.SourcePath, nil)
 	if srcErr != nil {
 		return nil, fmt.Errorf("sanitize source path: %w", srcErr)
 	}

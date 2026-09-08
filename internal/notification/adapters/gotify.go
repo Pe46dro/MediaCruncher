@@ -10,6 +10,12 @@ import (
 	"mediacruncher/internal/notification"
 )
 
+// gotifyValidateURL validates the Gotify API URL before use.
+// This is needed since Gotify constructs its own HTTP request, bypassing DoPOST's validation.
+func gotifyValidateURL(rawURL string) error {
+	return notification.ValidateURL(rawURL)
+}
+
 // GotifyAdapter delivers notifications to Gotify server.
 type GotifyAdapter struct {
 	*notification.HTTPAdapter
@@ -65,6 +71,10 @@ func (a *GotifyAdapter) Send(msg *notification.Message) (*notification.DeliveryR
 	}
 
 	start := time.Now()
+
+	if err := gotifyValidateURL(a.apiURL); err != nil {
+		return notification.BuildDeliveryResult(false, "", 0, fmt.Errorf("URL validation failed: %w", err), start), nil
+	}
 
 	priority := 5
 	switch msg.Event.Severity {
