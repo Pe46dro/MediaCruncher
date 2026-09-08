@@ -15,6 +15,3 @@ services:
       - ./config:/app/config:ro
       - ./data:/app/data
       - ./media:/app/media:ro
-    ports:
-      - "9090:9090"
-    working_dir: /app
