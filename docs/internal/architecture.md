@@ -150,7 +150,7 @@ The filesystem engine employs a resilient error handling approach:
 
 ### Trade-offs and Design Justification
 
-Concurrent subdirectory traversal was chosen over sequential traversal because modern storage systems benefit from parallel I/O operations, and the overhead of goroutine management in Go is minimal compared to I/O wait times. The worker limit prevents resource exhaustion on systems with thousands of small directories. The in-memory deduplication index trades memory for speed: storing hash entries for millions of files may require several hundred megabytes of RAM, but eliminates the need for database-assisted deduplication during discovery. Full cryptographic hashing is deferred to the evaluation pipeline to avoid reading large files during discovery, which would dramatically slow down the scan. The backpressure-aware ingestion buffer decouples discovery speed from processing speed, allowing the engine to gracefully handle scenarios where the transcoding pipeline is slower than file discovery without dropping work or requiring complex buffering layers.
+Concurrent subdirectory traversal was chosen over sequential traversal because modern storage systems benefit from parallel I/O operations, and the overhead of concurrent execution-unit management is minimal compared to I/O wait times. The worker limit prevents resource exhaustion on systems with thousands of small directories. The in-memory deduplication index trades memory for speed: storing hash entries for millions of files may require several hundred megabytes of RAM, but eliminates the need for database-assisted deduplication during discovery. Full cryptographic hashing is deferred to the evaluation pipeline to avoid reading large files during discovery, which would dramatically slow down the scan. The backpressure-aware ingestion buffer decouples discovery speed from processing speed, allowing the engine to gracefully handle scenarios where the transcoding pipeline is slower than file discovery without dropping work or requiring complex buffering layers.
 
 ---
 
@@ -600,9 +600,9 @@ Provide a unified, hierarchical configuration loading mechanism that consolidate
 
 ### Design
 
-Configuration values are loaded in a defined priority order: built-in defaults are applied first, then overridden by environment variables, then by command-line flags, and finally by a configuration file on disk. The last writer wins within each priority layer. Values are validated against a schema defined at startup; invalid values cause a startup failure with a detailed error listing each invalid field and its expected type and constraints. The configuration store is immutable once loaded at startup and is read through a thread-safe accessor that returns copies of configuration values.
+Each configuration snapshot is immutable once published. Configuration values are loaded in a defined priority order: built-in defaults are applied first, then overridden by environment variables, then by command-line flags, and finally by a configuration file on disk. The last writer wins within each priority layer. Values are validated against a schema defined at startup; invalid values cause a startup failure with a detailed error listing each invalid field and its expected type and constraints. The configuration store is read through a concurrency-safe accessor that returns copies of configuration values.
 
-Hot-reload capability allows specific configuration sections (notification channels, rate limits, scan paths, worker pool sizing) to be reloaded without restarting the application. When a configuration file change is detected on disk, the engine loads the new configuration, validates it, and atomically replaces the active configuration. Modules that depend on hot-reloadable settings subscribe to configuration change notifications and react to updates (e.g., the concurrency engine adjusts its worker pool size, the notification engine reloads channel adapters). Settings that cannot be hot-reloaded (database connection string, log level during initialization) require a full application restart.
+Hot-reload capability allows specific configuration sections (notification channels, rate limits, scan paths, worker pool sizing) to be reloaded without restarting the application. When a configuration file change is detected on disk, the engine loads the new configuration, validates it, and atomically replaces the active configuration snapshot. Modules that depend on hot-reloadable settings subscribe to configuration change notifications and react to updates (e.g., the concurrency engine adjusts its worker pool size, the notification engine reloads channel adapters). Settings that cannot be hot-reloaded (database connection string, log level during initialization) require a full application restart.
 
 All modules access configuration through a shared configuration accessor interface that provides typed getters for each configuration parameter. The accessor returns a default value when a configuration key is unset, ensuring that modules never encounter nil or missing configuration. Configuration changes are logged to the audit trail with the changed keys and old/new values.
 
@@ -675,9 +675,7 @@ Define the worker processing model as stateless where possible, enabling horizon
 
 ### Design
 
-Each worker in the concurrency engine is stateless with respect to its processing logic: a worker receives a job, performs the required processing (evaluation or transcoding), and returns the result. The worker does not cache in-memory state about files, rules, or processing history that would tie it to a specific processing session. All persistent state is stored in the persistence engine (Module A), and all configuration is read from the centralized configuration store.
-
-Workers may maintain local caches for performance optimization (e.g., the evaluation pipeline caches the rule set in memory, the transcoder caches the hardware capability profile), but these caches are rebuildable from persistent sources without affecting processing correctness. If a worker is replaced (due to crash, scaling, or redistribution), the new worker can process any pending job without requiring state migration.
+Workers are stateless with respect to processing logic: a worker receives a job, performs the required processing (evaluation or transcoding), and returns the result. Workers may maintain local caches for performance optimization (e.g., the evaluation pipeline caches the rule set in memory, the transcoder caches the hardware capability profile), but these caches are rebuildable from persistent sources without affecting processing correctness and can be discarded without state migration. The worker does not cache in-memory state about files, rules, or processing history that would tie it to a specific processing session. All persistent state is stored in the persistence engine (Module A), and all configuration is read from the centralized configuration store.
 
 Stateless worker design enables future horizontal scaling where workers run as separate processes or containers communicating through a gRPC or HTTP interface. The queue remains the single source of truth for work items, workers claim jobs through the queue interface, and results are returned through the same interface. The stateless model ensures that worker instances are interchangeable and that no single worker becomes a point of failure for specific jobs.
 
@@ -729,7 +727,7 @@ The system follows a pipeline architecture where data flows from filesystem inge
 
 - Module A is depended on by: B, C, D, E, F
 - Module B is depended on by: E
-- Module C is depended on by: E, D
+- Module C is depended on by: E, D (indirect via queue)
 - Module D is depended on by: E
 - Module E is depended on by: B, C, D, F
 - Module F is depended on by: E
