@@ -19,6 +19,16 @@ const (
 	CriticalLevel
 )
 
+var redactedKeys = map[string]bool{
+	"password":     true,
+	"token":        true,
+	"secret":       true,
+	"api_key":      true,
+	"api_secret":   true,
+	"smtp_pass":    true,
+	"webhook_url":  true,
+}
+
 func (l Level) String() string {
 	switch l {
 	case DebugLevel:
@@ -102,7 +112,11 @@ func (l *Logger) Log(level Level, msg string) {
 	if len(l.fields) > 0 {
 		ctx := make(map[string]interface{}, len(l.fields))
 		for _, f := range l.fields {
-			ctx[f.Key] = f.Value
+			if redactedKeys[f.Key] {
+				ctx[f.Key] = "[REDACTED]"
+			} else {
+				ctx[f.Key] = f.Value
+			}
 		}
 		entry["context"] = ctx
 	}

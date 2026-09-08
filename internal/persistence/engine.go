@@ -82,7 +82,7 @@ func New(cfg *config.PersistenceSettings, logger *observability.Logger, metrics 
 
 // open opens the database connection, runs migrations, and validates connectivity.
 func (e *Engine) open() error {
-	db, err := sql.Open("sqlite", e.cfg.DatabasePath+"?_journal=WAL&_synchronous="+e.cfg.Synchronous+"&cache=shared&_txlock=immediate")
+	db, err := sql.Open("sqlite", e.cfg.DatabasePath)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
@@ -93,6 +93,19 @@ func (e *Engine) open() error {
 	if err := db.Ping(); err != nil {
 		db.Close()
 		return fmt.Errorf("ping database: %w", err)
+	}
+
+	pragmas := []string{
+		"PRAGMA journal=WAL",
+		"PRAGMA synchronous=" + e.cfg.Synchronous,
+		"PRAGMA cache=shared",
+		"PRAGMA _txlock=immediate",
+	}
+	for _, pragma := range pragmas {
+		if _, err := db.Exec(pragma); err != nil {
+			db.Close()
+			return fmt.Errorf("exec pragma %s: %w", pragma, err)
+		}
 	}
 
 	if e.cfg.MigrationAuto {
@@ -113,6 +126,9 @@ func (e *Engine) open() error {
 
 // Close cleans up the database connection.
 func (e *Engine) Close() error {
+	if e == nil {
+		return nil
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -129,11 +145,6 @@ func (e *Engine) Close() error {
 
 	e.logger.Info("database connection closed")
 	return nil
-}
-
-// DB returns the underlying *sql.DB for direct access when needed.
-func (e *Engine) DB() *sql.DB {
-	return e.db
 }
 
 // InTransaction executes fn within a transaction.

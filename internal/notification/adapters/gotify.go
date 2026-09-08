@@ -1,6 +1,8 @@
 package adapters
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -87,10 +89,29 @@ func (a *GotifyAdapter) Send(msg *notification.Message) (*notification.DeliveryR
 		},
 	}
 
-	url := fmt.Sprintf("%s/application/message?token=%s", a.apiURL, a.appToken)
-	resp, respBody, err := a.DoPOST(url, gotifyMsg)
+	bodyBuf, err := json.Marshal(gotifyMsg)
 	if err != nil {
 		return notification.BuildDeliveryResult(false, "", 0, err, start), nil
+	}
+
+	req, err := http.NewRequest("POST", a.apiURL+"/application/message", bytes.NewReader(bodyBuf))
+	if err != nil {
+		return notification.BuildDeliveryResult(false, "", 0, err, start), nil
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Gotify-Key", a.appToken)
+
+	resp, err := a.GetClient().Do(req)
+	if err != nil {
+		return notification.BuildDeliveryResult(false, "", 0, err, start), nil
+	}
+	defer resp.Body.Close()
+
+	respBody := make([]byte, 0)
+	if resp.Body != nil {
+		respBody, _ = json.Marshal(map[string]interface{}{
+			"status_code": resp.StatusCode,
+		})
 	}
 
 	if resp.StatusCode != http.StatusOK {

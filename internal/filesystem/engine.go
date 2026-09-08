@@ -149,6 +149,24 @@ func discoverScope(ctx context.Context, scope ScanScope, dedupPolicy DedupPolicy
 			return nil
 		}
 
+		if d.Type()&os.ModeSymlink != 0 {
+			switch scope.SymlinkPolicy {
+			case SymlinkSkip:
+				return nil
+			case SymlinkDereference:
+				target, linkErr := os.Readlink(path)
+				if linkErr != nil {
+					warnings = append(warnings, fmt.Sprintf("cannot read symlink %s: %v", path, linkErr))
+					return nil
+				}
+				absTarget, _ := filepath.Abs(target)
+				if !strings.HasPrefix(absTarget, scope.RootPath+string(filepath.Separator)) && absTarget != scope.RootPath {
+					warnings = append(warnings, fmt.Sprintf("symlink escapes scope, skipping: %s -> %s", path, absTarget))
+					return nil
+				}
+			}
+		}
+
 		discovered++
 
 		info, infoErr := d.Info()

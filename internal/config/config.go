@@ -145,7 +145,7 @@ func DefaultConfig() Config {
 		},
 		Observability: ObservabilitySettings{
 			LogLevel:          "info",
-			MetricsAddr:       ":9090/metrics",
+			MetricsAddr:       "127.0.0.1:9090/metrics",
 			EnableHealthCheck: true,
 		},
 	}

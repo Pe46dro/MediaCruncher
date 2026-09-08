@@ -2,11 +2,15 @@ package notification
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 )
 
@@ -24,6 +28,7 @@ type AdapterConfig struct {
 	ToAddresses []string `json:"to_addresses"`
 	Enabled     bool   `json:"enabled"`
 	Timeout     string `json:"timeout"`
+	CACertPath  string `json:"ca_cert_path,omitempty"`
 }
 
 // Adapter is the interface that all channel adapters must implement.
@@ -87,11 +92,26 @@ func NewHTTPAdapter(name string, config AdapterConfig) *HTTPAdapter {
 			timeout = d
 		}
 	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if config.CACertPath != "" {
+		caCert, caErr := os.ReadFile(config.CACertPath)
+		if caErr == nil {
+			caCertPool := x509.NewCertPool()
+			if caCertPool.AppendCertsFromPEM(caCert) {
+				transport.TLSClientConfig = &tls.Config{
+					RootCAs: caCertPool,
+				}
+			}
+		}
+	}
+
 	return &HTTPAdapter{
 		name: name,
 		config: config,
 		client: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 		enabled: config.Enabled,
 	}
@@ -124,6 +144,11 @@ func (a *HTTPAdapter) GetType() string {
 // GetConfig returns the adapter configuration.
 func (a *HTTPAdapter) GetConfig() AdapterConfig {
 	return a.config
+}
+
+// GetClient returns the underlying HTTP client.
+func (a *HTTPAdapter) GetClient() *http.Client {
+	return a.client
 }
 
 // isEnabled returns whether the adapter is enabled.
@@ -173,16 +198,23 @@ func (a *HTTPAdapter) DoPOST(rawURL string, body interface{}) (*http.Response, [
 	if err != nil {
 		return nil, nil, fmt.Errorf("send request: %w", err)
 	}
-	defer resp.Body.Close()
 
-	respBody, err := json.Marshal(map[string]interface{}{
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		resp.Body.Close()
+		return nil, nil, fmt.Errorf("read response body: %w", err)
+	}
+	resp.Body.Close()
+
+	respBodyJSON, err := json.Marshal(map[string]interface{}{
 		"status_code": resp.StatusCode,
+		"body":        string(respBody),
 	})
 	if err != nil {
-		respBody = []byte(fmt.Sprintf(`{"status_code":%d}`, resp.StatusCode))
+		respBodyJSON = []byte(fmt.Sprintf(`{"status_code":%d}`, resp.StatusCode))
 	}
 
-	return resp, respBody, nil
+	return resp, respBodyJSON, nil
 }
 
 // BuildDeliveryResult creates a DeliveryResult from a delivery attempt.

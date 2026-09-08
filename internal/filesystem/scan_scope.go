@@ -65,7 +65,18 @@ func (s *ScanScope) Validate() []string {
 	if s.RootPath == "" {
 		return []string{"root_path is empty"}
 	}
-	info, err := os.Stat(s.RootPath)
+
+	cleanPath := filepath.Clean(s.RootPath)
+	if !filepath.IsAbs(cleanPath) {
+		abs, err := filepath.Abs(cleanPath)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("cannot resolve path: %s", err))
+			return warnings
+		}
+		cleanPath = abs
+	}
+
+	canonical, err := filepath.EvalSymlinks(cleanPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			warnings = append(warnings, fmt.Sprintf("path does not exist: %s", s.RootPath))
@@ -76,9 +87,18 @@ func (s *ScanScope) Validate() []string {
 		}
 		return warnings
 	}
+
+	info, err := os.Stat(canonical)
+	if err != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot stat path: %s", err))
+		return warnings
+	}
 	if !info.IsDir() {
 		warnings = append(warnings, fmt.Sprintf("path is not a directory: %s", s.RootPath))
 	}
+
+	s.RootPath = canonical
+
 	if s.SymlinkPolicy == "" {
 		s.SymlinkPolicy = SymlinkSkip
 	}
