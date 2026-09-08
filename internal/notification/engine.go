@@ -389,7 +389,22 @@ func (e *Engine) AddRoute(rule RoutingRule) {
 	e.router.AddRule(rule)
 }
 
-// GetDeadLetterQueue returns the dead-letter queue.
-func (e *Engine) GetDeadLetterQueue() *DeadLetterQueue {
-	return e.deadLetterQueue
+// DeadLetterSnapshot is a read-only snapshot of dead-letter queue entries.
+type DeadLetterSnapshot struct {
+	Records map[string]*DeadLetterRecord
+}
+
+// GetDeadLetterQueue returns a read-only snapshot of the dead-letter queue.
+func (e *Engine) GetDeadLetterQueue() DeadLetterSnapshot {
+	e.deadLetterQueue.mu.Lock()
+	defer e.deadLetterQueue.mu.Unlock()
+
+	snapshot := DeadLetterSnapshot{
+		Records: make(map[string]*DeadLetterRecord, len(e.deadLetterQueue.records)),
+	}
+	for k, v := range e.deadLetterQueue.records {
+		recCopy := *v
+		snapshot.Records[k] = &recCopy
+	}
+	return snapshot
 }

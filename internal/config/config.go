@@ -239,9 +239,10 @@ func applyEnv(cfg *Config) {
 		cfg.Evaluation.DefaultAction = v
 	}
 	if v := os.Getenv(envPrefix + "CONFIG_DIR"); v != "" {
-		// Re-read config file from env-specified directory
 		if data, err := os.ReadFile(filepath.Join(v, "mediacruncher.json")); err == nil {
-			json.Unmarshal(data, cfg) // best-effort, errors ignored
+			if err := json.Unmarshal(data, cfg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to re-read config from MC_CONFIG_DIR=%s: %v\n", v, err)
+			}
 		}
 	}
 }
