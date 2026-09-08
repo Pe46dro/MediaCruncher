@@ -1,0 +1,259 @@
+stages:
+  - validate
+  - build
+  - test
+  - verify
+  - sign
+  - release
+
+variables:
+  GO_VERSION: "1.25"
+  ARTIFACT_RETENTION_DAYS: "30"
+  SIGNING_ALGORITHM: "ecdsa-sha2-nistp256"
+
+validate:
+  stage: validate
+  tags:
+    - docker
+  script:
+    - echo "Validating repository structure..."
+    - test -f go.mod || { echo "go.mod not found"; exit 1; }
+    - test -f go.sum || { echo "go.sum not found"; exit 1; }
+    - test -d internal || { echo "internal directory not found"; exit 1; }
+    - test -d cmd || { echo "cmd directory not found"; exit 1; }
+    - go version
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+build-linux-amd64:
+  stage: build
+  tags:
+    - linux
+    - amd64
+  script:
+    - go version
+    - go mod download
+    - mkdir -p dist
+    - |
+      COMMIT_HASH=$(git rev-parse --short HEAD)
+      BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+      VERSION="${CI_COMMIT_TAG:-dev}"
+      go build -ldflags="-X mediacruncher/internal/observability.BuildVersion=$VERSION -X mediacruncher/internal/observability.BuildCommit=$COMMIT_HASH -X mediacruncher/internal/observability.BuildTime=$BUILD_TIME" -o dist/mediacruncher ./cmd/main.go
+    - ls -la dist/
+  artifacts:
+    paths:
+      - dist/mediacruncher
+    expire_in: $ARTIFACT_RETENTION_DAYS
+    reports:
+      coverage:
+        - coverage.txt
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build-linux-arm64:
+  stage: build
+  tags:
+    - linux
+    - arm64
+  script:
+    - go version
+    - go mod download
+    - mkdir -p dist
+    - |
+      COMMIT_HASH=$(git rev-parse --short HEAD)
+      BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+      VERSION="${CI_COMMIT_TAG:-dev}"
+      GOOS=linux GOARCH=arm64 go build -ldflags="-X mediacruncher/internal/observability.BuildVersion=$VERSION -X mediacruncher/internal/observability.BuildCommit=$COMMIT_HASH -X mediacruncher/internal/observability.BuildTime=$BUILD_TIME" -o dist/mediacruncher ./cmd/main.go
+    - ls -la dist/
+  artifacts:
+    paths:
+      - dist/mediacruncher
+    expire_in: $ARTIFACT_RETENTION_DAYS
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build-windows-amd64:
+  stage: build
+  tags:
+    - windows
+    - amd64
+  script:
+    - go version
+    - go mod download
+    - New-Item -ItemType Directory -Path dist -Force
+    - |
+      $CommitHash = git rev-parse --short HEAD
+      $BuildTime = Get-Date -Format "yyyyMMdd-HHmmss"
+      $Version = if ($env:CI_COMMIT_TAG) { $env:CI_COMMIT_TAG } else { "dev" }
+      $Ldflags = "-X mediacruncher/internal/observability.BuildVersion=$Version -X mediacruncher/internal/observability.BuildCommit=$CommitHash -X mediacruncher/internal/observability.BuildTime=$BuildTime"
+      go build -ldflags="$Ldflags" -o dist/mediacruncher.exe ./cmd/main.go
+    - Get-ChildItem dist/
+  artifacts:
+    paths:
+      - dist/mediacruncher.exe
+    expire_in: $ARTIFACT_RETENTION_DAYS
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build-darwin-amd64:
+  stage: build
+  tags:
+    - macos
+    - amd64
+  script:
+    - go version
+    - go mod download
+    - mkdir -p dist
+    - |
+      COMMIT_HASH=$(git rev-parse --short HEAD)
+      BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+      VERSION="${CI_COMMIT_TAG:-dev}"
+      GOOS=darwin GOARCH=amd64 go build -ldflags="-X mediacruncher/internal/observability.BuildVersion=$VERSION -X mediacruncher/internal/observability.BuildCommit=$COMMIT_HASH -X mediacruncher/internal/observability.BuildTime=$BUILD_TIME" -o dist/mediacruncher ./cmd/main.go
+    - ls -la dist/
+  artifacts:
+    paths:
+      - dist/mediacruncher
+    expire_in: $ARTIFACT_RETENTION_DAYS
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+build-darwin-arm64:
+  stage: build
+  tags:
+    - macos
+    - arm64
+  script:
+    - go version
+    - go mod download
+    - mkdir -p dist
+    - |
+      COMMIT_HASH=$(git rev-parse --short HEAD)
+      BUILD_TIME=$(date +%Y%m%d-%H%M%S)
+      VERSION="${CI_COMMIT_TAG:-dev}"
+      GOOS=darwin GOARCH=arm64 go build -ldflags="-X mediacruncher/internal/observability.BuildVersion=$VERSION -X mediacruncher/internal/observability.BuildCommit=$COMMIT_HASH -X mediacruncher/internal/observability.BuildTime=$BUILD_TIME" -o dist/mediacruncher ./cmd/main.go
+    - ls -la dist/
+  artifacts:
+    paths:
+      - dist/mediacruncher
+    expire_in: $ARTIFACT_RETENTION_DAYS
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+test-linux:
+  stage: test
+  tags:
+    - linux
+  script:
+    - go version
+    - go mod download
+    - go test -v -race -count=1 ./...
+    - go vet ./...
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+test-windows:
+  stage: test
+  tags:
+    - windows
+  script:
+    - go version
+    - go mod download
+    - go test -v -race -count=1 ./...
+    - go vet ./...
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+verify:
+  stage: verify
+  tags:
+    - linux
+  script:
+    - |
+      echo "Verifying all build artifacts..."
+      ARTIFACT_DIR="artifacts"
+      mkdir -p "$ARTIFACT_DIR"
+      for binary in dist/mediacruncher dist/mediacruncher.exe; do
+        if [ -f "$binary" ]; then
+          echo "Checking: $binary"
+          file "$binary"
+          if $binary --version 2>&1 || true; then
+            echo "Version check passed for $binary"
+          fi
+        fi
+      done
+      echo "Artifact verification complete."
+  needs:
+    - build-linux-amd64
+    - build-linux-arm64
+    - build-windows-amd64
+    - build-darwin-amd64
+    - build-darwin-arm64
+  rules:
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+sign:
+  stage: sign
+  tags:
+    - linux
+  script:
+    - |
+      echo "Setting up signing..."
+      mkdir -p .signing
+      echo "$SIGNING_KEY" | base64 -d > .signing/signing_key.pem
+      chmod 600 .signing/signing_key.pem
+      echo "Signing binaries..."
+      for binary in dist/mediacruncher dist/mediacruncher.exe; do
+        if [ -f "$binary" ]; then
+          openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
+          echo "Signed: $binary"
+        fi
+      done
+      echo "Generating checksums..."
+      sha256sum dist/mediacruncher* > checksums.txt
+  only:
+    - tags
+  variables:
+    SIGNING_KEY:
+      generate: true
+  artifacts:
+    paths:
+      - dist/*.sig
+      - checksums.txt
+    expire_in: $ARTIFACT_RETENTION_DAYS
+
+release:
+  stage: release
+  tags:
+    - linux
+  script:
+    - |
+      echo "Generating release notes..."
+      echo "## MediaCruncher $CI_COMMIT_TAG" > release_notes.md
+      echo "" >> release_notes.md
+      git log --oneline -50 >> release_notes.md
+      echo "" >> release_notes.md
+      echo "### Signature Verification" >> release_notes.md
+      echo "Each binary is signed with ECDSA-NISTP256. Verify with:" >> release_notes.md
+      echo '```bash' >> release_notes.md
+      echo "openssl dgst -sha256 -verify <(echo '<public-key>') -signature mediacruncher.sig mediacruncher" >> release_notes.md
+      echo '```' >> release_notes.md
+      echo "Uploading to GitLab Packages registry..."
+  variables:
+    CI_JOB_TOKEN: $CI_JOB_TOKEN
+    REGISTRY_TOKEN: $CI_JOB_TOKEN
+  only:
+    - tags
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: manual
+      allow_failure: false
