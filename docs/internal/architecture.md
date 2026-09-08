@@ -312,13 +312,15 @@ Orchestrate the concurrent processing of transcoding jobs across a configurable 
 
 - Retry Record: Metadata attached to queue entries that have failed processing, tracking the retry count, next scheduled retry time based on exponential backoff, the failure reason, and whether the maximum retry limit has been reached.
 
+- Batch Splitter: A mechanism for decomposing large work items into smaller sub-tasks that are distributed across the worker pool for parallel processing. The batch splitter accepts a large job, partitions it into independent sub-tasks (such as splitting a multi-stream media file into per-stream analysis tasks), assigns each sub-task to the worker pool with appropriate priority inheritance from the parent job, and reassembles sub-task results into a unified outcome. The batch splitter preserves priority ordering by inheriting the parent job's priority for all sub-tasks and maintaining a result assembly queue that waits for all sub-tasks to complete before emitting the combined result.
+
 ### Key Interface Contracts
 
 - Task Submission: Accepts work items from the ingestion pipeline (file paths for evaluation) and the filesystem engine (completed scan items). Items are enqueued with a priority level and a job type classifier (evaluate, transcode, notify). The submission interface returns a status indicating acceptance or rejection due to queue capacity limits, triggering backpressure upstream.
 
 - Priority Claim: Workers claim the highest-priority available item for their job type. The claim operation is atomic: only one worker can claim a specific item, and the item transitions from pending to processing state with the worker identifier recorded. Items are claimed in priority order within each job type, with lower-priority items served only when all higher-priority items are in progress or queued.
 
-- Worker Dispatch: Routes a claimed item to the appropriate processing stage based on its job type. Evaluation items are dispatched to the evaluation pipeline module. Transcode items are dispatched to the transcoder module. Notification items are dispatched to the notification module. The dispatch operation creates a cancellation context for the worker and returns a result channel for collecting the outcome.
+- Worker Dispatch: Routes a claimed item to the appropriate processing stage based on its job type. Evaluation items are dispatched to the evaluation pipeline module. Transcode items are dispatched to the transcoder module. Notification items are dispatched to the notification module. The dispatch operation creates a cancellation context for the worker and returns a result sink for collecting the outcome.
 
 - Result Collection: Collects the outcome from dispatched workers, including success, failure with error detail, or timeout. On success, the result is processed according to the routing table (e.g., a successful evaluation may enqueue a transcode job). On failure, the retry logic determines whether to requeue the item with an exponential backoff delay or mark it as permanently failed.
 
@@ -370,7 +372,9 @@ The concurrency engine lifecycle follows these phases:
 
 ### Trade-offs and Design Justification
 
-An in-memory task queue was chosen over a persistent queue to minimize latency and avoid the complexity of distributed task management for a single-process daemon. The zero-CGO constraint is satisfied by implementing the priority queue with a pure-Go heap data structure. The worker pool model with context-based cancellation provides fine-grained control over worker lifecycle and shutdown behavior without requiring external process management. The exponential backoff retry policy prevents thundering herd scenarios where many retried jobs flood the system simultaneously. Backpressure is enforced at the queue submission level rather than through rate limiting, creating a natural flow-control mechanism that adapts to actual system load rather than a fixed rate. The routing table approach decouples the concurrency engine from the specific processing pipeline, allowing the system to add new processing stages without modifying the core orchestration logic.
+Constraints addressed: backpressure via task queue capacity limits, context propagation through cancellation contexts on each worker, graceful shutdown via drain phase transitions.
+
+An in-memory task queue was chosen over a persistent queue to minimize latency and avoid the complexity of distributed task management for a single-process daemon. The zero-CGO constraint is satisfied by implementing the priority queue entirely within the application runtime, without any external C library dependencies. The worker pool model with context-based cancellation provides fine-grained control over worker lifecycle and shutdown behavior without requiring external process management. The exponential backoff retry policy prevents thundering herd scenarios where many retried jobs flood the system simultaneously. Backpressure is enforced at the queue submission level rather than through rate limiting, creating a natural flow-control mechanism that adapts to actual system load rather than a fixed rate. The routing table approach decouples the concurrency engine from the specific processing pipeline, allowing the system to add new processing stages without modifying the core orchestration logic.
 
 ---
 
@@ -392,7 +396,7 @@ Deliver operational notifications to external communication channels through a p
 
 ### Key Interface Contracts
 
-- Adapter Registration: Registers a channel adapter by type (Telegram, Discord, Slack, Gotify, SMTP) with its configuration parameters. Each adapter validates its configuration at registration time and reports registration success or failure. Registered adapters are stored in a thread-safe adapter registry that the delivery router consults to select the appropriate adapter.
+- Adapter Registration: Registers a channel adapter by type (Telegram, Discord, Slack, Gotify, SMTP) with its configuration parameters. Each adapter validates its configuration at registration time and reports registration success or failure. Registered adapters are stored in a concurrency-controlled adapter registry that the delivery router consults to select the appropriate adapter.
 
 - Event Routing: Accepts an event and routes it to the configured notification channels based on event type and severity. Routing rules are configured per event type, specifying which channel adapters should receive the event and whether the delivery should be immediate or batched. Events that do not match any routing rule are silently discarded.
 
@@ -439,6 +443,8 @@ The notification engine lifecycle follows these phases:
 - Cross-Cutting (Observability): Publishes delivery success and failure rates, batch sizes, delivery latency, and channel adapter health metrics.
 
 ### Trade-offs and Design Justification
+
+Constraints addressed: rate limiting via per-channel rate limiters with retry delays, delivery guarantees via at-least-once retry with exponential backoff and dead-letter queue preservation.
 
 The pluggable adapter architecture provides extensibility without modifying core notification logic, allowing new notification platforms to be added by implementing a single adapter interface. Batching is used to reduce the number of API calls to notification platforms, which reduces both network overhead and the risk of rate limit violations. Per-channel rate limiting ensures that one slow or rate-limited channel does not block deliveries to other channels. The dead-letter queue provides a safety net for delivery failures, ensuring that no notification is silently lost. Storing delivery records in the persistence engine provides auditability at the cost of additional database write overhead, which is considered acceptable given that delivery tracking is a critical operational requirement.
 
