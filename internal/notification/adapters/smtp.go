@@ -1,7 +1,9 @@
 package adapters
 
 import (
+	"crypto/tls"
 	"fmt"
+	"net"
 	"net/smtp"
 	"strings"
 	"time"
@@ -41,7 +43,7 @@ func NewSMTPAdapter(config notification.AdapterConfig) (*SMTPAdapter, error) {
 	}, nil
 }
 
-// Send delivers an email via SMTP.
+// Send delivers an email via SMTP with explicit TLS (STARTTLS or SMTPS).
 func (a *SMTPAdapter) Send(msg *notification.Message) (*notification.DeliveryResult, error) {
 	if !a.IsEnabled() {
 		return &notification.DeliveryResult{
@@ -64,16 +66,130 @@ func (a *SMTPAdapter) Send(msg *notification.Message) (*notification.DeliveryRes
 	subject := msg.Title
 	body := fmt.Sprintf("Subject: %s\r\n\r\n%s", subject, msg.Content)
 
-	auth := smtp.PlainAuth("", a.username, a.password, a.host)
 	addr := fmt.Sprintf("%s:%d", a.host, a.port)
+	auth := smtp.PlainAuth("", a.username, a.password, a.host)
 	to := a.toAddrs
 
-	err := smtp.SendMail(addr, auth, a.username, to, []byte(body))
-	if err != nil {
-		return notification.BuildDeliveryResult(false, "", 0, err, start), nil
+	var deliverErr error
+
+	if a.port == 465 {
+		deliverErr = a.sendSMTPS(addr, auth, to, body)
+	} else {
+		deliverErr = a.sendSTARTTLS(addr, auth, to, body)
+	}
+
+	if deliverErr != nil {
+		return notification.BuildDeliveryResult(false, "", 0, deliverErr, start), nil
 	}
 
 	return notification.BuildDeliveryResult(true, fmt.Sprintf("smtp-%s", msg.Title), 250, nil, start), nil
+}
+
+// sendSMTPS delivers via SMTPS (implicit TLS on port 465).
+func (a *SMTPAdapter) sendSMTPS(addr string, auth smtp.Auth, to []string, body string) error {
+	tlsConfig := &tls.Config{
+		ServerName: a.host,
+		MinVersion: tls.VersionTLS12,
+	}
+	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	if err != nil {
+		return fmt.Errorf("SMTPS TLS dial: %w", err)
+	}
+	client, err := smtp.NewClient(conn, a.host)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("SMTPS smtp client: %w", err)
+	}
+	if err := client.Auth(auth); err != nil {
+		client.Close()
+		return fmt.Errorf("SMTPS auth: %w", err)
+	}
+	if err := client.Mail(a.username); err != nil {
+		client.Close()
+		return fmt.Errorf("SMTPS mail: %w", err)
+	}
+	for _, recipient := range to {
+		if err := client.Rcpt(recipient); err != nil {
+			client.Close()
+			return fmt.Errorf("SMTPS rcpt %s: %w", recipient, err)
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("SMTPS data: %w", err)
+	}
+	_, err = w.Write([]byte(body))
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("SMTPS write data: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		client.Close()
+		return fmt.Errorf("SMTPS close data: %w", err)
+	}
+	client.Close()
+	return nil
+}
+
+// sendSTARTTLS delivers via STARTTLS (port 587 with explicit TLS upgrade).
+func (a *SMTPAdapter) sendSTARTTLS(addr string, auth smtp.Auth, to []string, body string) error {
+	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
+	if err != nil {
+		return fmt.Errorf("STARTTLS dial: %w", err)
+	}
+
+	client, err := smtp.NewClient(conn, a.host)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("STARTTLS smtp client: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName: a.host,
+		MinVersion: tls.VersionTLS12,
+	}
+
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(tlsConfig); err != nil {
+			client.Close()
+			return fmt.Errorf("STARTTLS failed: %w", err)
+		}
+	} else {
+		client.Close()
+		return fmt.Errorf("server does not support STARTTLS on port %d", a.port)
+	}
+
+	if err := client.Auth(auth); err != nil {
+		client.Close()
+		return fmt.Errorf("STARTTLS auth: %w", err)
+	}
+	if err := client.Mail(a.username); err != nil {
+		client.Close()
+		return fmt.Errorf("STARTTLS mail: %w", err)
+	}
+	for _, recipient := range to {
+		if err := client.Rcpt(recipient); err != nil {
+			client.Close()
+			return fmt.Errorf("STARTTLS rcpt %s: %w", recipient, err)
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("STARTTLS data: %w", err)
+	}
+	_, err = w.Write([]byte(body))
+	if err != nil {
+		client.Close()
+		return fmt.Errorf("STARTTLS write data: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		client.Close()
+		return fmt.Errorf("STARTTLS close data: %w", err)
+	}
+	client.Close()
+	return nil
 }
 
 // SendBatch delivers a batch of messages via SMTP.
