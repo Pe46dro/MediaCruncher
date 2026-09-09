@@ -18,6 +18,7 @@
   },
   "transcoder": {
     "hardware_acceleration": true,
+    "target_codec": "h.265",
     "vmaf_threshold": 90.0,
     "preset": "medium",
     "max_encoding_duration": "2h",

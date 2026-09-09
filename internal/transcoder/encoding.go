@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -119,10 +120,15 @@ func (e *Encoder) Execute(ctx context.Context, job *TranscodeJob) *EncodingResul
 		} else {
 			result.ExitCode = -1
 		}
-		result.Error = err.Error()
+		stderrMsg := strings.TrimSpace(stderr.String())
+		if stderrMsg != "" {
+			result.Error = fmt.Sprintf("%v: %s", err, stderrMsg)
+		} else {
+			result.Error = err.Error()
+		}
 		result.Success = false
 
-		if e.IsHardwareError(stderr.String()) {
+		if e.IsHardwareError(result.Error) {
 			result.Warnings = append(result.Warnings, "hardware encoding failure, retry with software")
 		}
 
@@ -148,7 +154,7 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 	preset := job.Preset
 	codec := job.NegotiatedCodec
 	if codec == nil {
-		codec = &NegotiatedCodec{Codec: "h.264", Acceleration: "sw"}
+		codec = &NegotiatedCodec{Codec: "h.265", Acceleration: "sw"}
 	}
 
 	args := []string{
@@ -156,10 +162,12 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 		"-hide_banner",
 	}
 
-	if job.NegotiatedCodec.Acceleration != "sw" {
-		args = append(args, "-hwaccel", job.NegotiatedCodec.Acceleration)
-	if job.Preset != nil && job.Preset.PreferredDevice >= 0 {
-			args = append(args, "-hwaccel_device", fmt.Sprintf("%d", job.Preset.PreferredDevice))
+	if codec.Acceleration != "sw" && codec.Acceleration != "" {
+		if codec.Acceleration == "cuda" || codec.Acceleration == "qsv" || codec.Acceleration == "vaapi" || codec.Acceleration == "d3d11va" || codec.Acceleration == "dxva2" {
+			args = append(args, "-hwaccel", codec.Acceleration)
+			if preset != nil && preset.PreferredDevice >= 0 && codec.Acceleration != "vaapi" {
+				args = append(args, "-hwaccel_device", fmt.Sprintf("%d", preset.PreferredDevice))
+			}
 		}
 	}
 
@@ -169,59 +177,94 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 	}
 	args = append(args, "-i", sanitizedSource)
 
-	switch codec.Codec {
+	normalizedCodec := normalizeCodec(codec.Codec)
+	var videoEncoder string
+
+	switch normalizedCodec {
 	case "h.264":
-		if job.NegotiatedCodec.Acceleration == "cuda" {
-			args = append(args, "-c:v", "h264_nvenc")
-		} else if job.NegotiatedCodec.Acceleration == "qsv" {
-			args = append(args, "-c:v", "h264_qsv")
-		} else if job.NegotiatedCodec.Acceleration == "videotoolbox" {
-			args = append(args, "-c:v", "h264_videotoolbox")
-		} else {
-			args = append(args, "-c:v", "libx264")
+		switch codec.Acceleration {
+		case "cuda":
+			videoEncoder = "h264_nvenc"
+		case "qsv":
+			videoEncoder = "h264_qsv"
+		case "amf":
+			videoEncoder = "h264_amf"
+		case "vaapi":
+			videoEncoder = "h264_vaapi"
+		case "videotoolbox":
+			videoEncoder = "h264_videotoolbox"
+		default:
+			videoEncoder = "libx264"
 		}
 	case "h.265":
-		if job.NegotiatedCodec.Acceleration == "cuda" {
-			args = append(args, "-c:v", "hevc_nvenc")
-		} else if job.NegotiatedCodec.Acceleration == "qsv" {
-			args = append(args, "-c:v", "hevc_qsv")
-		} else if job.NegotiatedCodec.Acceleration == "videotoolbox" {
-			args = append(args, "-c:v", "hevc_videotoolbox")
-		} else {
-			args = append(args, "-c:v", "libx265")
+		switch codec.Acceleration {
+		case "cuda":
+			videoEncoder = "hevc_nvenc"
+		case "qsv":
+			videoEncoder = "hevc_qsv"
+		case "amf":
+			videoEncoder = "hevc_amf"
+		case "vaapi":
+			videoEncoder = "hevc_vaapi"
+		case "videotoolbox":
+			videoEncoder = "hevc_videotoolbox"
+		default:
+			videoEncoder = "libx265"
 		}
 	case "av1":
-		if job.NegotiatedCodec.Acceleration == "qsv" {
-			args = append(args, "-c:v", "av1_qsv")
-		} else if job.NegotiatedCodec.Acceleration == "videotoolbox" {
-			args = append(args, "-c:v", "av1_videotoolbox")
-		} else {
-			args = append(args, "-c:v", "libaom-av1")
+		switch codec.Acceleration {
+		case "cuda":
+			videoEncoder = "av1_nvenc"
+		case "qsv":
+			videoEncoder = "av1_qsv"
+		case "amf":
+			videoEncoder = "av1_amf"
+		case "vaapi":
+			videoEncoder = "av1_vaapi"
+		case "videotoolbox":
+			videoEncoder = "av1_videotoolbox"
+		default:
+			videoEncoder = "libsvtav1"
 		}
 	default:
-		args = append(args, "-c:v", codec.Codec)
+		videoEncoder = codec.Codec
 	}
 
-	if preset.QualityLevel > 0 {
-		args = append(args, "-crf", fmt.Sprintf("%d", preset.QualityLevel))
+	args = append(args, "-c:v", videoEncoder)
+
+	if preset != nil && preset.QualityLevel > 0 {
+		switch codec.Acceleration {
+		case "cuda":
+			args = append(args, "-cq", fmt.Sprintf("%d", preset.QualityLevel))
+		case "qsv":
+			args = append(args, "-global_quality", fmt.Sprintf("%d", preset.QualityLevel))
+		case "videotoolbox":
+			args = append(args, "-q:v", fmt.Sprintf("%d", preset.QualityLevel))
+		default:
+			args = append(args, "-crf", fmt.Sprintf("%d", preset.QualityLevel))
+		}
 	}
 
-	if preset.PresetSpeed != "" {
+	if preset != nil && preset.PresetSpeed != "" {
 		args = append(args, "-preset", preset.PresetSpeed)
 	}
 
-	if preset.Width > 0 && preset.Height > 0 {
+	if preset != nil && preset.Width > 0 && preset.Height > 0 {
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:%d", preset.Width, preset.Height))
 	}
 
-	if preset.BitRate > 0 {
+	if preset != nil && preset.BitRate > 0 {
 		args = append(args, "-b:v", fmt.Sprintf("%dk", preset.BitRate/1000))
 	}
 
-	switch job.NegotiatedCodec.Codec {
+	if normalizedCodec == "h.265" && strings.HasSuffix(strings.ToLower(outputPath), ".mp4") {
+		args = append(args, "-tag:v", "hvc1")
+	}
+
+	switch normalizedCodec {
 	case "h.264", "h.265", "av1":
 		args = append(args, "-c:a", "aac")
-		if preset.AudioBitRate > 0 {
+		if preset != nil && preset.AudioBitRate > 0 {
 			args = append(args, "-b:a", fmt.Sprintf("%dk", preset.AudioBitRate))
 		}
 	default:
@@ -246,10 +289,18 @@ func (e *Encoder) IsHardwareError(stderr string) bool {
 		"hardware",
 		"dxva",
 		"cuda",
+		"nvenc",
 		"qsv",
+		"amf",
 		"vaapi",
 		"videotoolbox",
 		"failed to initialise",
+		"cannot load",
+		"driver",
+		"no device",
+		"unknown encoder",
+		"device creation failed",
+		"function not implemented",
 	}
 	lower := lowercase(stderr)
 	for _, err := range hardwareErrors {

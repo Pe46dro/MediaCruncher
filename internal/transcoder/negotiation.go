@@ -103,12 +103,34 @@ func (n *Negotiator) Negotiate(preset *EncodingPreset) *NegotiationResult {
 		}
 	}
 
-	bestAccel := codecAccels[0]
-	for _, accel := range codecAccels {
-		if accel == "cuda" || accel == "qsv" || accel == "videotoolbox" {
-			bestAccel = accel
+	// Prioritize hardware encoders
+	bestAccel := ""
+	priorities := []string{"cuda", "qsv", "amf", "vaapi", "videotoolbox"}
+	for _, p := range priorities {
+		for _, accel := range codecAccels {
+			if accel == p {
+				bestAccel = accel
+				break
+			}
+		}
+		if bestAccel != "" {
 			break
 		}
+	}
+
+	if bestAccel == "" {
+		for _, accel := range codecAccels {
+			if accel != "sw" {
+				bestAccel = accel
+				break
+			}
+		}
+	}
+
+	if bestAccel == "" {
+		result.NegotiatedCodec.Acceleration = "sw"
+		result.NegotiatedCodec.IsSoftware = true
+		return result
 	}
 
 	result.NegotiatedCodec.Acceleration = bestAccel

@@ -186,7 +186,7 @@ jobs:
             Available on GitHub Container Registry:
 
             ```bash
-            docker pull ghcr.io/pe46dro/mediacruncher:${{ steps.version.outputs.version }}
+            docker pull ghcr.io/pe46dro/mediacruncher:${{ github.ref_name }}
             docker pull ghcr.io/pe46dro/mediacruncher:latest
             ```
 

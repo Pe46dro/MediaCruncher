@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 )
@@ -64,13 +63,24 @@ func Discovery(ctx context.Context, binaryPath string, preferredDevice int) *Dis
 		return result
 	}
 
+	for i := range devices {
+		if devices[i].Acceleration != "sw" {
+			devices[i].Healthy = HealthCheck(ctx, devices[i].Acceleration, devices[i].ID)
+		}
+	}
+
 	result.DevicesFound = len(devices)
 	result.Profile.Devices = devices
 
 	for _, codec := range getDefaultCodecs() {
 		for _, device := range devices {
 			if device.Healthy && !device.ThermalThrottled {
-				result.Profile.Codecs[codec] = append(result.Profile.Codecs[codec], device.Acceleration)
+				for _, sc := range device.SupportedCodecs {
+					if sc == codec {
+						result.Profile.Codecs[codec] = appendUnique(result.Profile.Codecs[codec], device.Acceleration)
+						break
+					}
+				}
 			}
 		}
 	}
@@ -101,53 +111,76 @@ func enumerateGPUs(ctx context.Context, binaryPath string) ([]GPUDevice, error) 
 // parseHwAccels parses ffmpeg hardware acceleration output into GPU devices.
 func parseHwAccels(output string) []GPUDevice {
 	var devices []GPUDevice
-
-	hwAccelPattern := regexp.MustCompile(`^\s*(cuda|cuvid|qsv|dxva2|d3d11va|videotoolbox|vaapi)\s+(\w+)\s*$`)
+	seen := make(map[string]bool)
 
 	lines := strings.Split(output, "\n")
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if matches := hwAccelPattern.FindStringSubmatch(line); matches != nil {
-			accel := matches[1]
-			deviceName := "default"
-			if accel == "cuda" {
-				deviceName = "NVIDIA CUDA"
-			} else if accel == "qsv" {
-				deviceName = "Intel QuickSync"
-			} else if accel == "dxva2" {
-				deviceName = "Windows DXVA2"
-			} else if accel == "d3d11va" {
-				deviceName = "Windows D3D11"
-			} else if accel == "videotoolbox" {
-				deviceName = "Apple VideoToolbox"
-			} else if accel == "vaapi" {
-				deviceName = "Linux VAAPI"
-			}
+		trimmed := strings.ToLower(strings.TrimSpace(line))
+		if trimmed == "" || strings.Contains(trimmed, ":") {
+			continue
+		}
 
-			supportedCodecs := getSupportedCodecsForAccel(accel)
+		var (
+			accel           string
+			deviceName      string
+			vendor          string
+			supportedCodecs []string
+		)
 
+		switch {
+		case strings.HasPrefix(trimmed, "cuda") || strings.HasPrefix(trimmed, "cuvid"):
+			accel = "cuda"
+			deviceName = "NVIDIA CUDA"
+			vendor = "NVIDIA"
+			supportedCodecs = []string{"h.264", "h.265", "av1"}
+		case strings.HasPrefix(trimmed, "qsv"):
+			accel = "qsv"
+			deviceName = "Intel QuickSync"
+			vendor = "Intel"
+			supportedCodecs = []string{"h.264", "h.265", "av1"}
+		case strings.HasPrefix(trimmed, "amf"):
+			accel = "amf"
+			deviceName = "AMD AMF"
+			vendor = "AMD"
+			supportedCodecs = []string{"h.264", "h.265", "av1"}
+		case strings.HasPrefix(trimmed, "vaapi"):
+			accel = "vaapi"
+			deviceName = "Linux VAAPI"
+			vendor = "Linux"
+			supportedCodecs = []string{"h.264", "h.265", "av1"}
+		case strings.HasPrefix(trimmed, "videotoolbox"):
+			accel = "videotoolbox"
+			deviceName = "Apple VideoToolbox"
+			vendor = "Apple"
+			supportedCodecs = []string{"h.264", "h.265", "av1"}
+		}
+
+		if accel != "" && !seen[accel] {
+			seen[accel] = true
 			devices = append(devices, GPUDevice{
-				ID:                len(devices),
-				Name:              deviceName,
-				Acceleration:      accel,
-				SupportedCodecs:   supportedCodecs,
-				MemoryMB:          estimateMemory(accel),
-				Utilization:       0,
-				Temperature:       0,
-				ThermalThrottled:  false,
-				Healthy:           true,
+				ID:               len(devices),
+				Name:             deviceName,
+				Vendor:           vendor,
+				Acceleration:     accel,
+				SupportedCodecs:  supportedCodecs,
+				MemoryMB:         estimateMemory(accel),
+				Utilization:      0,
+				Temperature:      0,
+				ThermalThrottled: false,
+				Healthy:          true,
 			})
 		}
 	}
 
 	if len(devices) == 0 {
 		devices = append(devices, GPUDevice{
-			ID:             0,
-			Name:           "Software",
-			Acceleration:   "sw",
+			ID:              0,
+			Name:            "Software",
+			Vendor:          "Generic",
+			Acceleration:    "sw",
 			SupportedCodecs: []string{"h.264", "h.265", "av1"},
-			MemoryMB:       0,
-			Healthy:        true,
+			MemoryMB:        0,
+			Healthy:         true,
 		})
 	}
 
@@ -157,18 +190,8 @@ func parseHwAccels(output string) []GPUDevice {
 // getSupportedCodecsForAccel returns the list of codecs supported by an acceleration method.
 func getSupportedCodecsForAccel(accel string) []string {
 	switch accel {
-	case "cuda":
-		return []string{"h.264", "h.265"}
-	case "qsv":
-		return []string{"h.264", "h.265"}
-	case "dxva2":
-		return []string{"h.264", "h.265"}
-	case "d3d11va":
-		return []string{"h.264", "h.265"}
-	case "videotoolbox":
+	case "cuda", "qsv", "amf", "vaapi", "videotoolbox":
 		return []string{"h.264", "h.265", "av1"}
-	case "vaapi":
-		return []string{"h.264", "h.265"}
 	default:
 		return []string{"h.264", "h.265"}
 	}
@@ -177,14 +200,12 @@ func getSupportedCodecsForAccel(accel string) []string {
 // estimateMemory returns an estimated GPU memory for an acceleration type.
 func estimateMemory(accel string) int {
 	switch accel {
-	case "cuda":
+	case "cuda", "amf":
 		return 4096
-	case "qsv", "dxva2", "d3d11va":
+	case "qsv", "vaapi":
 		return 2048
 	case "videotoolbox":
 		return 0
-	case "vaapi":
-		return 2048
 	default:
 		return 0
 	}
@@ -212,11 +233,32 @@ func appendUnique(slice []string, items ...string) []string {
 
 // HealthCheck verifies the health of a GPU device.
 func HealthCheck(ctx context.Context, accel string, deviceID int) bool {
-	if accel == "sw" {
+	if accel == "sw" || accel == "" {
 		return true
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-hwaccel", accel, "-hwaccel_device", fmt.Sprintf("%d", deviceID), "-f", "null", "-")
+	testEncoder := ""
+	switch accel {
+	case "cuda":
+		testEncoder = "h264_nvenc"
+	case "qsv":
+		testEncoder = "h264_qsv"
+	case "amf":
+		testEncoder = "h264_amf"
+	case "vaapi":
+		testEncoder = "h264_vaapi"
+	case "videotoolbox":
+		testEncoder = "h264_videotoolbox"
+	}
+
+	if testEncoder != "" {
+		cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04", "-c:v", testEncoder, "-f", "null", "-")
+		if err := cmd.Run(); err == nil {
+			return true
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-init_hw_device", fmt.Sprintf("%s:%d", accel, deviceID), "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04", "-f", "null", "-")
 	err := cmd.Run()
 	return err == nil
 }

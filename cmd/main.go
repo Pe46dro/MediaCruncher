@@ -177,6 +177,14 @@ func main() {
 				base := strings.TrimSuffix(filepath.Base(file.AbsolutePath), ext)
 				outputPath := filepath.Join(filepath.Dir(file.AbsolutePath), base+"_optimized"+ext)
 
+				targetCodec := cfg.Transcoder.TargetCodec
+				if targetCodec == "" {
+					targetCodec = cfg.Transcoder.Codec
+				}
+				if targetCodec == "" {
+					targetCodec = "h.265"
+				}
+
 				job := &transcoder.TranscodeJob{
 					JobID:         jobID,
 					SourcePath:    file.AbsolutePath,
@@ -184,7 +192,7 @@ func main() {
 					VMAFThreshold: cfg.Transcoder.VMAFThreshold,
 					MaxDuration:   maxEncDur,
 					Preset: &transcoder.EncodingPreset{
-						TargetCodec:          "h.264",
+						TargetCodec:          targetCodec,
 						QualityLevel:         23,
 						PresetSpeed:          cfg.Transcoder.VPreset,
 						AudioCodec:           "aac",

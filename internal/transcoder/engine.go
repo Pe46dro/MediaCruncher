@@ -44,14 +44,35 @@ func New(cfg Config) *Engine {
 	}
 
 	eng := &Engine{
-		vmafThreshold:    cfg.VMAFThreshold,
-		maxEncodingTime:  cfg.MaxEncodingDuration,
-		binaryPath:       cfg.BinaryPath,
-		logger:           cfg.Logger,
+		vmafThreshold:   cfg.VMAFThreshold,
+		maxEncodingTime: cfg.MaxEncodingDuration,
+		binaryPath:      cfg.BinaryPath,
+		logger:          cfg.Logger,
 	}
 
 	if eng.logger == nil {
 		eng.logger = observability.NewStdLogger(observability.DebugLevel, "transcoder")
+	}
+
+	if cfg.HardwareAcceleration {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		disc := Discovery(ctx, cfg.BinaryPath, cfg.PreferredDevice)
+		if disc != nil && disc.Profile != nil {
+			eng.hardwareProfile = disc.Profile
+			if eng.logger != nil {
+				eng.logger.WithFields(
+					observability.Field{Key: "devices_found", Value: disc.DevicesFound},
+					observability.Field{Key: "discovery_time", Value: disc.DiscoveryTime.String()},
+				).Info("hardware acceleration profile initialized")
+				for _, dev := range disc.Profile.Devices {
+					eng.logger.WithFields(
+						observability.Field{Key: "name", Value: dev.Name},
+						observability.Field{Key: "accel", Value: dev.Acceleration},
+					).Info("detected hardware encoder device")
+				}
+			}
+		}
 	}
 
 	eng.negotiator = NewNegotiator(eng.hardwareProfile)
@@ -67,10 +88,10 @@ func New(cfg Config) *Engine {
 func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOutcome {
 	start := time.Now()
 	outcome := &TranscodeOutcome{
-		JobID:       job.JobID,
-		SourcePath:  job.SourcePath,
-		Attempt:     job.Attempt,
-		IsRetry:     job.IsRetry,
+		JobID:      job.JobID,
+		SourcePath: job.SourcePath,
+		Attempt:    job.Attempt,
+		IsRetry:    job.IsRetry,
 	}
 
 	if !e.validateSource(job) {
@@ -105,30 +126,38 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 	outcome.Encoding = encodingResult
 
 	if !encodingResult.Success {
-		if !job.IsRetry && e.encoder.IsHardwareError(encodingResult.Error) {
-			retryJob := &TranscodeJob{
-				JobID:           job.JobID,
-				SourcePath:      job.SourcePath,
-				OutputPath:      job.OutputPath,
-				Preset:          job.Preset,
-				StagingDir:      stagingDir,
-				VMAFThreshold:   job.VMAFThreshold,
-				MaxDuration:     job.MaxDuration,
-				Attempt:         job.Attempt + 1,
-				IsRetry:         true,
+		isHW := (job.NegotiatedCodec != nil && job.NegotiatedCodec.Acceleration != "sw") || e.encoder.IsHardwareError(encodingResult.Error)
+		if !job.IsRetry && isHW {
+			if e.logger != nil {
+				e.logger.WithFields(
+					observability.Field{Key: "error", Value: encodingResult.Error},
+					observability.Field{Key: "job_id", Value: job.JobID},
+				).Warn("hardware encoding failed, retrying with software fallback")
 			}
-			if retryJob.Preset == nil {
-				retryJob.Preset = &EncodingPreset{
-					TargetCodec:    "h.264",
-					QualityLevel:   18,
-					PresetSpeed:    "slow",
-					HardwareAcceleration: false,
+			retryJob := &TranscodeJob{
+				JobID:         job.JobID,
+				SourcePath:    job.SourcePath,
+				OutputPath:    job.OutputPath,
+				StagingDir:    stagingDir,
+				VMAFThreshold: job.VMAFThreshold,
+				MaxDuration:   job.MaxDuration,
+				Attempt:       job.Attempt + 1,
+				IsRetry:       true,
+			}
+			if job.Preset != nil {
+				p := *job.Preset
+				p.HardwareAcceleration = false
+				p.QualityLevel = max(20, p.QualityLevel-3)
+				if p.PresetSpeed == "fast" || p.PresetSpeed == "veryfast" {
+					p.PresetSpeed = "medium"
 				}
+				retryJob.Preset = &p
 			} else {
-				retryJob.Preset.HardwareAcceleration = false
-				retryJob.Preset.QualityLevel = max(20, retryJob.Preset.QualityLevel-3)
-				if retryJob.Preset.PresetSpeed == "fast" || retryJob.Preset.PresetSpeed == "veryfast" {
-					retryJob.Preset.PresetSpeed = "medium"
+				retryJob.Preset = &EncodingPreset{
+					TargetCodec:          "h.265",
+					QualityLevel:         18,
+					PresetSpeed:          "slow",
+					HardwareAcceleration: false,
 				}
 			}
 			retryResult := e.Transcode(ctx, retryJob)
@@ -140,6 +169,7 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 			return outcome
 		}
 		outcome.Status = TranscodeStatusFailed
+		outcome.Error = encodingResult.Error
 		e.stagingManager.Cleanup(job.JobID)
 		return outcome
 	}
@@ -150,25 +180,27 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 	if !vmafResult.Passed {
 		if !job.IsRetry {
 			retryJob := &TranscodeJob{
-				JobID:           job.JobID,
-				SourcePath:      job.SourcePath,
-				OutputPath:      job.OutputPath,
-				StagingDir:      stagingDir,
-				VMAFThreshold:   job.VMAFThreshold,
-				MaxDuration:     job.MaxDuration,
-				Attempt:         job.Attempt + 1,
-				IsRetry:         true,
+				JobID:         job.JobID,
+				SourcePath:    job.SourcePath,
+				OutputPath:    job.OutputPath,
+				StagingDir:    stagingDir,
+				VMAFThreshold: job.VMAFThreshold,
+				MaxDuration:   job.MaxDuration,
+				Attempt:       job.Attempt + 1,
+				IsRetry:       true,
 			}
-			if retryJob.Preset == nil {
-				retryJob.Preset = &EncodingPreset{
-					TargetCodec:    "h.264",
-					QualityLevel:   18,
-					PresetSpeed:    "slow",
+			if job.Preset != nil {
+				p := *job.Preset
+				p.QualityLevel = max(20, p.QualityLevel-3)
+				if p.PresetSpeed == "fast" || p.PresetSpeed == "veryfast" {
+					p.PresetSpeed = "medium"
 				}
+				retryJob.Preset = &p
 			} else {
-				retryJob.Preset.QualityLevel = max(20, retryJob.Preset.QualityLevel-3)
-				if retryJob.Preset.PresetSpeed == "fast" || retryJob.Preset.PresetSpeed == "veryfast" {
-					retryJob.Preset.PresetSpeed = "medium"
+				retryJob.Preset = &EncodingPreset{
+					TargetCodec:  "h.265",
+					QualityLevel: 18,
+					PresetSpeed:  "slow",
 				}
 			}
 			retryResult := e.Transcode(ctx, retryJob)

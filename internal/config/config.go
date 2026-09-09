@@ -52,6 +52,8 @@ type TranscoderSettings struct {
 	VPreset              string  `json:"preset"`
 	MaxEncodingDuration  string  `json:"max_encoding_duration"`
 	FallbackToSoftware   bool    `json:"fallback_to_software"`
+	TargetCodec          string  `json:"target_codec,omitempty"`
+	Codec                string  `json:"codec,omitempty"`
 }
 
 // ConcurrencySettings holds worker pool configuration.
@@ -125,6 +127,7 @@ func DefaultConfig() Config {
 			VPreset:              "medium",
 			MaxEncodingDuration:  "2h",
 			FallbackToSoftware:   true,
+			TargetCodec:          "h.265",
 		},
 		Concurrency: ConcurrencySettings{
 			WorkerCount:     4,
@@ -230,6 +233,12 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv(envPrefix + "HARDWARE_ACCELERATION"); v != "" {
 		cfg.Transcoder.HardwareAcceleration = strings.EqualFold(v, "true")
 	}
+	if v := os.Getenv(envPrefix + "TARGET_CODEC"); v != "" {
+		cfg.Transcoder.TargetCodec = v
+	}
+	if v := os.Getenv(envPrefix + "CODEC"); v != "" {
+		cfg.Transcoder.Codec = v
+	}
 	if v := os.Getenv(envPrefix + "VMAF_THRESHOLD"); v != "" {
 		if f := parseFloat(v); f > 0 {
 			cfg.Transcoder.VMAFThreshold = f
@@ -311,6 +320,13 @@ type ParsedConcurrency struct {
 
 // ParsedTranscoder returns transcoder settings with parsed durations.
 func (c *Config) ParsedTranscoder() ParsedTranscoder {
+	codec := c.Transcoder.TargetCodec
+	if codec == "" {
+		codec = c.Transcoder.Codec
+	}
+	if codec == "" {
+		codec = "h.265"
+	}
 	return ParsedTranscoder{
 		HardwareAcceleration: c.Transcoder.HardwareAcceleration,
 		PreferredDevice:      c.Transcoder.PreferredDevice,
@@ -318,6 +334,7 @@ func (c *Config) ParsedTranscoder() ParsedTranscoder {
 		Preset:               c.Transcoder.VPreset,
 		MaxEncodingDuration:  ParseDuration(c.Transcoder.MaxEncodingDuration),
 		FallbackToSoftware:   c.Transcoder.FallbackToSoftware,
+		TargetCodec:          codec,
 	}
 }
 
@@ -329,6 +346,7 @@ type ParsedTranscoder struct {
 	Preset               string
 	MaxEncodingDuration  time.Duration
 	FallbackToSoftware   bool
+	TargetCodec          string
 }
 
 // ParsedNotification returns notification settings with parsed durations.
