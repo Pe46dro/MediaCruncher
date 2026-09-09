@@ -51,6 +51,7 @@ jobs:
 
       - name: Build binary
         id: build
+        shell: pwsh
         env:
           GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
           GOARCH: ${{ matrix.arch }}
@@ -72,9 +73,11 @@ jobs:
           echo "binary=$outputPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
 
       - name: Generate checksum
+        shell: pwsh
         run: |
           $buildDir = "dist"
           $binaryPath = if (Test-Path dist/mediacruncher.exe) { "dist/mediacruncher.exe" } else { "dist/mediacruncher" }
+          $binaryName = Split-Path $binaryPath -Leaf
           $hash = (Get-FileHash -Path $binaryPath -Algorithm SHA256).Hash.ToString().ToLower()
           $checksumFile = "$binaryPath.sha256"
           "$hash  $binaryName" | Out-File -FilePath $checksumFile -Encoding utf8
