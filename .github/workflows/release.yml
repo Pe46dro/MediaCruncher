@@ -35,9 +35,6 @@ jobs:
             arch: arm64
             goos: darwin
     runs-on: ${{ matrix.os }}
-    env:
-      GOOS: ${{ matrix.goos }}
-      GOARCH: ${{ matrix.arch }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -68,6 +65,10 @@ jobs:
       - name: Build binary
         id: build
         shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
         run: |
           $buildDir = "dist"
           if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }

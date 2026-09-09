@@ -55,6 +55,7 @@ jobs:
         env:
           GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
           GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
         run: |
           $buildDir = "dist"
           if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }
