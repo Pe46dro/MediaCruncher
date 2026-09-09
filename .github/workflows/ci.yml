@@ -2,7 +2,7 @@ name: CI - Build, Test, Sign, Release
 
 on:
   push:
-    branches: [main, develop, 'release/**', 'feat/**']
+    branches: [main, develop, 'release/**', 'feat/**', 'fix/**']
   release:
     types: [published]
   pull_request:
