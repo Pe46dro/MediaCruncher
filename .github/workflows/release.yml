@@ -24,6 +24,9 @@ jobs:
           - os: windows-latest
             arch: arm64
     runs-on: ${{ matrix.os }}
+    env:
+      GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
+      GOARCH: ${{ matrix.arch }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -54,9 +57,6 @@ jobs:
       - name: Build binary
         id: build
         shell: pwsh
-        env:
-          GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
-          GOARCH: ${{ matrix.arch }}
         run: |
           $buildDir = "dist"
           if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }
@@ -74,14 +74,19 @@ jobs:
           go build -ldflags="$ldflags" -o $outputPath ./cmd/main.go
 
           echo "binary=$outputPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          echo "binary_name=$binaryName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
 
       - name: Generate checksum
         shell: pwsh
         run: |
           $buildDir = "dist"
-          $ext = if ($env:GOOS -eq "windows") { ".exe" } else { "" }
-          $binaryName = "mediacruncher-$($env:GOOS)-$($env:GOARCH)$ext"
-          $binaryPath = Join-Path $buildDir $binaryName
+          $binaryFile = Get-ChildItem -Path $buildDir -File | Where-Object { $_.Extension -ne ".sha256" -and $_.Extension -ne ".sig" } | Select-Object -First 1
+          if (-not $binaryFile) {
+              Write-Error "No binary found in $buildDir to checksum"
+              exit 1
+          }
+          $binaryPath = $binaryFile.FullName
+          $binaryName = $binaryFile.Name
           $hash = (Get-FileHash -Path $binaryPath -Algorithm SHA256).Hash.ToString().ToLower()
           $checksumContent = "$hash  $binaryName"
           $checksumContent | Out-File -FilePath "$binaryPath.sha256" -Encoding utf8
