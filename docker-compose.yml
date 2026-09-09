@@ -15,4 +15,4 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./data:/app/data
-      - ./media:/app/media:ro
+      - ./media:/app/media

@@ -27,56 +27,13 @@ go build -ldflags="-X mediacruncher/internal/observability.BuildVersion=$Commit 
 
 ### Configuration
 
-Create `mediacruncher.json` in one of these locations (checked in order):
+Configuration is loaded from `mediacruncher.json`. A complete ready-to-use template is available in [`mediacruncher.json`](./mediacruncher.json) (and [`config/mediacruncher.json`](./config/mediacruncher.json) for Docker Compose).
 
-1. Directory specified by `MC_CONFIG_DIR`
+The daemon searches for `mediacruncher.json` in these locations (checked in order):
+
+1. Directory specified by `MC_CONFIG_DIR` environment variable
 2. Directory alongside the executable (if `mediacruncher.json` exists there)
 3. Current working directory
-
-```json
-{
-  "scan_scopes": [
-    {
-      "root_path": "C:/Users/me/Movies",
-      "included_extensions": ["mp4", "mkv", "avi", "mov"],
-      "exclusion_patterns": ["@Recycle/**"],
-      "max_depth": 10,
-      "symlink_policy": "skip"
-    }
-  ],
-  "persistence": {
-    "database_path": "mediacruncher.db",
-    "synchronous": "full"
-  },
-  "evaluation": {
-    "default_action": "transcode",
-    "probe_timeout": "30s"
-  },
-  "transcoder": {
-    "hardware_acceleration": true,
-    "vmaf_threshold": 90.0,
-    "preset": "medium",
-    "max_encoding_duration": "2h",
-    "fallback_to_software": true
-  },
-  "concurrency": {
-    "worker_count": 4,
-    "queue_capacity": 1000,
-    "max_retries": 3,
-    "base_backoff": "1s",
-    "max_backoff": "1m",
-    "drain_timeout": "5m"
-  },
-  "notification": {
-    "channels": [],
-    "rate_limit_per_minute": 60
-  },
-  "observability": {
-    "log_level": "info",
-    "metrics_addr": ":9090/metrics"
-  }
-}
-```
 
 Or override any setting via environment variables with the `MC_` prefix:
 

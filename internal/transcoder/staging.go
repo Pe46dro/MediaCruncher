@@ -2,6 +2,7 @@ package transcoder
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -53,10 +54,32 @@ func (s *StagingManager) Commit(stagingDir, outputPath string) error {
 	}
 
 	if err := os.Rename(stagedFile, outputPath); err != nil {
-		return fmt.Errorf("move staged output to final location: %w", err)
+		if copyErr := copyFile(stagedFile, outputPath); copyErr != nil {
+			return fmt.Errorf("move staged output to final location: %w", err)
+		}
+		_ = os.Remove(stagedFile)
 	}
 
 	return nil
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }
 
 // Cleanup removes the staging directory and all its contents.

@@ -84,7 +84,11 @@ func (e *Encoder) Execute(ctx context.Context, job *TranscodeJob) *EncodingResul
 		return result
 	}
 
-	encodedPath := filepath.Join(e.StagingDir, job.JobID+".out"+filepath.Ext(job.SourcePath))
+	encodedDir := e.StagingDir
+	if job.StagingDir != "" {
+		encodedDir = job.StagingDir
+	}
+	encodedPath := filepath.Join(encodedDir, filepath.Base(job.OutputPath))
 
 	cmd, err := e.buildCommand(ctx, job, encodedPath)
 	if err != nil {

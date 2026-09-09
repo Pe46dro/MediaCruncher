@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -110,7 +111,7 @@ func (s *ScanScope) Validate() []string {
 
 // classifyMediaType determines the media type based on file extension and MIME sniffing.
 func classifyMediaType(path string, ext string) MediaType {
-	ext = lowercase(ext)
+	ext = strings.TrimPrefix(lowercase(ext), ".")
 	mediaType := sniffMediaType(path)
 	if mediaType != "" {
 		return mediaType

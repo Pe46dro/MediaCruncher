@@ -57,7 +57,7 @@ func New(cfg Config) *Engine {
 	eng.negotiator = NewNegotiator(eng.hardwareProfile)
 	eng.encoder = NewEncoder(cfg.BinaryPath, cfg.StagingDir)
 	eng.vmafVerifier = NewVMAFVerifier(cfg.BinaryPath, cfg.VMAFThreshold, "libsvm")
-	eng.corruptionDetector = NewCorruptionDetector(cfg.BinaryPath)
+	eng.corruptionDetector = NewCorruptionDetector("ffprobe")
 	eng.stagingManager = NewStagingManager(cfg.StagingDir, 24*time.Hour)
 
 	return eng
@@ -144,7 +144,7 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 		return outcome
 	}
 
-	vmafResult := e.vmafVerifier.Verify(ctx, job.SourcePath, encodingResult.OutputPath)
+	vmafResult := e.vmafVerifier.VerifyWithFallback(ctx, job.SourcePath, encodingResult.OutputPath)
 	outcome.Verification = vmafResult
 
 	if !vmafResult.Passed {

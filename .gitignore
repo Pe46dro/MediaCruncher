@@ -1,0 +1,15 @@
+# Binaries
+dist/
+*.exe
+mediacruncher
+
+# Database and runtime data
+*.db
+*.db-wal
+*.db-shm
+data/
+media/
+
+# Temporary and staging
+staging/
+*.tmp

@@ -149,19 +149,16 @@ func estimateQuality(original, transcoded string) float64 {
 
 	ratio := float64(transInfo) / float64(origInfo)
 
-	if ratio < 0.1 {
+	if ratio < 0.05 {
 		return 50.0
 	}
-	if ratio < 0.3 {
-		return 65.0
-	}
-	if ratio < 0.5 {
+	if ratio < 0.15 {
 		return 75.0
 	}
-	if ratio < 0.8 {
-		return 85.0
+	if ratio <= 1.0 {
+		return 92.0
 	}
-	return 92.0
+	return 95.0
 }
 
 // getFileSize returns the size of a file in bytes.

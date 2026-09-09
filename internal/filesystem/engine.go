@@ -294,12 +294,12 @@ func finalDedup(files []FileRecord) []FileRecord {
 }
 
 func matchExtension(ext string, allowed []string) bool {
-	ext = lowercase(ext)
+	ext = strings.TrimPrefix(lowercase(ext), ".")
 	if ext == "" {
 		return false
 	}
 	for _, a := range allowed {
-		if lowercase(a) == ext {
+		if strings.TrimPrefix(lowercase(a), ".") == ext {
 			return true
 		}
 	}
