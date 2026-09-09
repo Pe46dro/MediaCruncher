@@ -105,4 +105,4 @@ flowchart TD
 
 - **Multi-OS Shells:** CI scripts using PowerShell syntax (`$buildDir`, `Test-Path`, etc.) **must** declare `shell: pwsh` on GitHub Actions; otherwise, Linux and macOS runners default to `/bin/bash` and fail with exit code 127 (`=: command not found`).
 - **GitLab CI:** Standard pipeline defined in `.gitlab-ci.yml` (validate -> build -> test -> verify -> docker-build -> sign -> release).
-- **GitHub CI:** Workflows located in `.github/workflows/` (`ci.yml` and `release.yml`). Push triggers must include target branches (e.g. `'fix/**'`, `'feat/**'`, `main`).
+- **GitHub CI:** Workflows located in `.github/workflows/` (`ci.yml`, `release.yml`, and `docker.yml`). Multi-arch container images (`linux/amd64`, `linux/arm64`) are built and published to GitHub Container Registry (`ghcr.io/pe46dro/mediacruncher`) on tags and `main` branch pushes.

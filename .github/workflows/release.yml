@@ -181,6 +181,15 @@ jobs:
             | macOS | amd64 | `mediacruncher-darwin-amd64` |
             | macOS | arm64 | `mediacruncher-darwin-arm64` |
 
+            ### Docker Image
+
+            Available on GitHub Container Registry:
+
+            ```bash
+            docker pull ghcr.io/pe46dro/mediacruncher:${{ steps.version.outputs.version }}
+            docker pull ghcr.io/pe46dro/mediacruncher:latest
+            ```
+
             ### Verification
 
             Each binary includes an individual SHA-256 checksum (`.sha256`) and an optional ECDSA signature (`.sig`).

@@ -130,13 +130,17 @@ No test files exist yet — the repository passes `go test ./...` with "no test 
 
 ## Docker
 
-### Quick Start
+### Pull from GitHub Container Registry
 
-Build the image:
+The official multi-architecture (`linux/amd64`, `linux/arm64`) image is published on GitHub Container Registry:
 
 ```bash
-docker build -t mediacruncher:test .
+docker pull ghcr.io/pe46dro/mediacruncher:latest
+# or a specific release tag
+docker pull ghcr.io/pe46dro/mediacruncher:v0.1.0
 ```
+
+### Quick Start
 
 Run with a default configuration (creates `mediacruncher.json` from env):
 
@@ -147,7 +151,13 @@ docker run -d --name mediacruncher \
   -v ./config:/app/config:ro \
   -v ./data:/app/data \
   -v ./media:/app/media:ro \
-  mediacruncher:test
+  ghcr.io/pe46dro/mediacruncher:latest
+```
+
+Or build locally:
+
+```bash
+docker build -t mediacruncher:local .
 ```
 
 ### Docker Compose
