@@ -12,6 +12,7 @@ env:
   GO_VERSION: '1.25'
   ARTIFACT_RETENTION_DAYS: 30
   SIGNING_ALGORITHM: ecdsa-sha2-nistp256
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 permissions:
   contents: write
@@ -31,10 +32,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -85,7 +86,7 @@ jobs:
           echo "checksum=$checksumFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mediacruncher-${{ runner.os == 'macOS' && 'Darwin' || (runner.os == 'Windows' && 'Windows' || 'Linux') }}-${{ matrix.arch }}
           path: |
@@ -99,7 +100,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
@@ -115,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
@@ -142,7 +143,7 @@ jobs:
           fi
 
       - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: signed-artifacts
           path: artifacts/
@@ -155,14 +156,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download signed artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           name: signed-artifacts
           path: release-artifacts
 
       - name: Generate release notes
         id: notes
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const { data: commits } = await github.rest.repos.listCommits({
@@ -180,7 +181,7 @@ jobs:
             core.setOutput('body', body);
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: release-artifacts/**/*
           body: ${{ steps.notes.outputs.body }}

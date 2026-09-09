@@ -8,6 +8,7 @@ on:
 env:
   GO_VERSION: '1.25'
   ARTIFACT_RETENTION_DAYS: 30
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 
 permissions:
   contents: write
@@ -37,10 +38,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -104,7 +105,7 @@ jobs:
           $checksumContent | Out-File -FilePath "$binaryPath.sha256" -Encoding utf8
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mediacruncher-${{ matrix.goos }}-${{ matrix.arch }}
           path: dist/
@@ -117,10 +118,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: all-artifacts
 
@@ -159,7 +160,7 @@ jobs:
           cat checksums.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             all-artifacts/**/*
