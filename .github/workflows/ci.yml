@@ -120,17 +120,25 @@ jobs:
 
       - name: Setup signing key
         run: |
-          echo "${{ secrets.SIGNING_KEY }}" | base64 -d > signing_key.pem
+          mkdir -p .signing
+          if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "${{ secrets.SIGNING_KEY }}" | base64 -d > .signing/signing_key.pem
+            chmod 600 .signing/signing_key.pem
+          fi
         shell: bash
 
       - name: Sign binaries
         run: |
-          for dir in artifacts/*/; do
-            binary=$(find "$dir" -maxdepth 1 -type f -name "mediacruncher*" ! -name "*.sha256" ! -name "*.sig" | head -1)
-            if [ -n "$binary" ]; then
-              openssl dgst -sha256 -sign signing_key.pem -out "${binary}.sig" "$binary"
-            fi
-          done
+          if [ -f .signing/signing_key.pem ] && [ -s .signing/signing_key.pem ]; then
+            for dir in artifacts/*/; do
+              binary=$(find "$dir" -maxdepth 1 -type f -name "mediacruncher*" ! -name "*.sha256" ! -name "*.sig" | head -1)
+              if [ -n "$binary" ]; then
+                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
+              fi
+            done
+          else
+            echo "Warning: SIGNING_KEY not provided or empty, skipping signature"
+          fi
 
       - name: Upload signed artifacts
         uses: actions/upload-artifact@v4
@@ -161,22 +169,21 @@ jobs:
               repo: context.repo.repo,
               per_page: 50,
             });
-            const sinceTag = context.payload.release.tag_name;
-            let body = `## Release Notes\n\n`;
+            let body = '## Release Notes\n\n';
             commits.forEach(commit => {
               body += `- ${commit.commit.message.split('\n')[0]}\n`;
             });
-            body += `\n## Signature Verification\n\n` +
-                    `Each binary has a detached ECDSA signature file (`.sha256` and `.sig`).\n` +
-                    `Verify with: \`openssl dgst -sha256 -verify <(echo "<public-key>") -signature mediacruncher.sig mediacruncher\`\n`;
+            body += '\n## Signature Verification\n\n' +
+                    'Each binary has a detached ECDSA signature file (`.sha256` and `.sig`).\n' +
+                    'Verify with: `openssl dgst -sha256 -verify <(echo "<public-key>") -signature mediacruncher.sig mediacruncher`\n';
             core.setOutput('body', body);
 
-      - name: Publish draft release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: release-artifacts/**/*
           body: ${{ steps.notes.outputs.body }}
-          draft: true
+          draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
