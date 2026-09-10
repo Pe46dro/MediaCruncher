@@ -266,7 +266,11 @@
         mediaTableBody.innerHTML = filtered.map(item => {
           let badgeHtml = '';
           if (item.status === 'completed') {
-            badgeHtml = '<span class="badge badge-completed">Completato</span>';
+            if (item.replaced_original) {
+              badgeHtml = '<span class="badge badge-completed">Completato</span> <span class="badge badge-replaced">Sostituito</span>';
+            } else {
+              badgeHtml = '<span class="badge badge-completed">Completato</span>';
+            }
           } else if (item.status === 'skipped_quality') {
             badgeHtml = '<span class="badge badge-skipped-quality">Qualità Preservata</span>';
           } else if (item.status === 'ignored') {
@@ -282,6 +286,8 @@
           let note = '-';
           if (item.status === 'skipped_quality') {
             note = '<span style="color: #FBBF24;">Originale mantenuto (perdita > soglia)</span>';
+          } else if (item.replaced_original) {
+            note = '<span style="color: #C084FC; font-weight: 600;">Originale sostituito sul posto</span>';
           } else if (item.output_path) {
             const outName = item.output_path.split('/').pop().split('\\').pop();
             note = `<span style="color: #34D399;">${escapeHtml(outName)}</span>`;

@@ -53,9 +53,10 @@ func TestProcessedMediaPersistence(t *testing.T) {
 		FileHash:   hash1,
 		FileSize:   1000000,
 		Status:     "completed",
-		OutputPath: "/media/video1_optimized.mp4",
-		VMAFScore:  94.5,
-		DurationMs: 1200,
+		OutputPath:       "/media/video1_optimized.mp4",
+		VMAFScore:        94.5,
+		DurationMs:       1200,
+		ReplacedOriginal: true,
 	}
 
 	// 1. Initial query should be nil
@@ -80,7 +81,7 @@ func TestProcessedMediaPersistence(t *testing.T) {
 	if found == nil {
 		t.Fatal("expected found record, got nil")
 	}
-	if found.SourcePath != rec1.SourcePath || found.Status != "completed" || found.VMAFScore != 94.5 {
+	if found.SourcePath != rec1.SourcePath || found.Status != "completed" || found.VMAFScore != 94.5 || !found.ReplacedOriginal {
 		t.Fatalf("record data mismatch: %+v", found)
 	}
 

@@ -153,8 +153,8 @@ func sniffMediaType(path string) MediaType {
 	return ""
 }
 
-// computePartialHash computes a hash from the first and last megabyte of the file.
-func computePartialHash(path string) (string, error) {
+// ComputePartialHash computes a hash from the first and last megabyte of the file.
+func ComputePartialHash(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("open file: %w", err)
@@ -187,6 +187,10 @@ func computePartialHash(path string) (string, error) {
 		h.Write(buf[:n])
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func computePartialHash(path string) (string, error) {
+	return ComputePartialHash(path)
 }
 
 func lowercase(s string) string {

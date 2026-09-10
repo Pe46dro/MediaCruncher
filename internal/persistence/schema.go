@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // migration represents a single schema migration.
 type migration struct {
@@ -92,6 +92,12 @@ var migrations = []migration{
 			CREATE INDEX IF NOT EXISTS idx_processed_media_hash ON processed_media(file_hash);
 			CREATE INDEX IF NOT EXISTS idx_processed_media_path ON processed_media(source_path);
 			CREATE INDEX IF NOT EXISTS idx_processed_media_status ON processed_media(status);
+		`,
+	},
+	{
+		version: 3,
+		sql: `
+			ALTER TABLE processed_media ADD COLUMN replaced_original INTEGER DEFAULT 0;
 		`,
 	},
 }

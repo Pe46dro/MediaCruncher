@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,9 +17,9 @@ func TestWebServerEndpoints(t *testing.T) {
 	state := NewStateTracker()
 	state.SetSystemInfo("NVENC", "h.265", 90.0, 10.0)
 
-	var scanTriggered bool
+	var scanTriggered atomic.Bool
 	triggerFunc := func() {
-		scanTriggered = true
+		scanTriggered.Store(true)
 	}
 
 	logger := observability.NewStdLogger(observability.DebugLevel, "test")
@@ -87,7 +88,7 @@ func TestWebServerEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 for /api/scan, got %d", rec.Code)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if !scanTriggered {
+	if !scanTriggered.Load() {
 		t.Error("expected scan trigger to be called")
 	}
 

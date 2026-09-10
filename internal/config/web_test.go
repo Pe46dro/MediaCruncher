@@ -77,3 +77,16 @@ func TestWebPortEnvOverride(t *testing.T) {
 		t.Errorf("expected listen addr 0.0.0.0:9999, got %s", cfg.Web.ListenAddr())
 	}
 }
+
+func TestReplaceExistingFileEnvOverride(t *testing.T) {
+	os.Setenv("MC_REPLACE_EXISTING_FILE", "true")
+	defer os.Unsetenv("MC_REPLACE_EXISTING_FILE")
+
+	cfg := DefaultConfig()
+	applyEnv(&cfg)
+
+	if !cfg.Transcoder.ReplaceExistingFile {
+		t.Errorf("expected ReplaceExistingFile to be true from env, got false")
+	}
+}
+

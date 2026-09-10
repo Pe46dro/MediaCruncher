@@ -52,6 +52,7 @@ type TranscoderSettings struct {
 	VMAFThreshold        float64 `json:"vmaf_threshold"`
 	MaxQualityDrop       float64 `json:"max_quality_drop"`
 	DiscardOnQualityLoss bool    `json:"discard_on_quality_loss"`
+	ReplaceExistingFile  bool    `json:"replace_existing_file"`
 	VPreset              string  `json:"preset"`
 	MaxEncodingDuration  string  `json:"max_encoding_duration"`
 	FallbackToSoftware   bool    `json:"fallback_to_software"`
@@ -162,6 +163,7 @@ func DefaultConfig() Config {
 			VMAFThreshold:        90.0,
 			MaxQualityDrop:       10.0,
 			DiscardOnQualityLoss: true,
+			ReplaceExistingFile:  false,
 			VPreset:              "medium",
 			MaxEncodingDuration:  "2h",
 			FallbackToSoftware:   true,
@@ -294,6 +296,9 @@ func applyEnv(cfg *Config) {
 	}
 	if v := os.Getenv(envPrefix + "DISCARD_ON_QUALITY_LOSS"); v != "" {
 		cfg.Transcoder.DiscardOnQualityLoss = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv(envPrefix + "REPLACE_EXISTING_FILE"); v != "" {
+		cfg.Transcoder.ReplaceExistingFile = strings.EqualFold(v, "true") || v == "1"
 	}
 	if v := os.Getenv(envPrefix + "WEB_ENABLED"); v != "" {
 		cfg.Web.Enabled = strings.EqualFold(v, "true") || v == "1"

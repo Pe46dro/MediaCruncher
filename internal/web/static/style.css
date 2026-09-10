@@ -651,6 +651,12 @@ body {
   border: 1px solid rgba(16, 185, 129, 0.3);
 }
 
+.badge-replaced {
+  background: rgba(139, 92, 246, 0.15);
+  color: #C084FC;
+  border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
 .badge-skipped-quality {
   background: rgba(245, 158, 11, 0.15);
   color: #FBBF24;

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -152,6 +153,7 @@ func main() {
 		observability.Field{Key: "vmaf_threshold", Value: cfg.Transcoder.VMAFThreshold},
 		observability.Field{Key: "max_quality_drop", Value: cfg.Transcoder.MaxQualityDrop},
 		observability.Field{Key: "discard_on_quality_loss", Value: cfg.Transcoder.DiscardOnQualityLoss},
+		observability.Field{Key: "replace_existing_file", Value: cfg.Transcoder.ReplaceExistingFile},
 	).Info("mediacruncher daemon initialized")
 
 	processScan = func() {
@@ -298,10 +300,40 @@ func main() {
 						vmafScore = outcome.Verification.VMAFScore
 					}
 
+					finalOutputPath := outcome.OutputPath
+					replacedOriginal := false
+					if cfg.Transcoder.ReplaceExistingFile && outcome.OutputPath != "" && outcome.OutputPath != file.AbsolutePath {
+						_ = os.Remove(file.AbsolutePath)
+						if err := os.Rename(outcome.OutputPath, file.AbsolutePath); err == nil {
+							finalOutputPath = file.AbsolutePath
+							replacedOriginal = true
+							logger.WithFields(
+								observability.Field{Key: "original", Value: file.AbsolutePath},
+								observability.Field{Key: "new_file", Value: finalOutputPath},
+							).Info("original file replaced with optimized version")
+						} else {
+							if cpErr := copyFile(outcome.OutputPath, file.AbsolutePath); cpErr == nil {
+								_ = os.Remove(outcome.OutputPath)
+								finalOutputPath = file.AbsolutePath
+								replacedOriginal = true
+								logger.WithFields(
+									observability.Field{Key: "original", Value: file.AbsolutePath},
+									observability.Field{Key: "new_file", Value: finalOutputPath},
+								).Info("original file replaced with optimized version via copy")
+							} else {
+								logger.WithFields(
+									observability.Field{Key: "error", Value: err},
+									observability.Field{Key: "copy_error", Value: cpErr},
+								).Error("failed to replace original file with optimized version")
+							}
+						}
+					}
+
 					logger.WithFields(
-						observability.Field{Key: "output", Value: outcome.OutputPath},
+						observability.Field{Key: "output", Value: finalOutputPath},
 						observability.Field{Key: "duration", Value: outcome.Duration.String()},
 						observability.Field{Key: "vmaf_score", Value: vmafScore},
+						observability.Field{Key: "replaced_original", Value: replacedOriginal},
 					).Info("transcoding completed successfully")
 
 					if queueID > 0 {
@@ -310,20 +342,47 @@ func main() {
 
 					// Persist completed record in SQLite with hash!
 					_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
-						SourcePath: file.AbsolutePath,
-						FileHash:   file.PartialHash,
-						FileSize:   file.Size,
-						Status:     "completed",
-						OutputPath: outcome.OutputPath,
-						VMAFScore:  vmafScore,
-						DurationMs: outcome.Duration.Milliseconds(),
+						SourcePath:       file.AbsolutePath,
+						FileHash:         file.PartialHash,
+						FileSize:         file.Size,
+						Status:           "completed",
+						OutputPath:       finalOutputPath,
+						VMAFScore:        vmafScore,
+						DurationMs:       outcome.Duration.Milliseconds(),
+						ReplacedOriginal: replacedOriginal,
 					})
 
-					broker.Broadcast("transcode_completed", "success", fmt.Sprintf("Transcodifica completata con successo: %s (VMAF: %.2f)", filepath.Base(file.AbsolutePath), vmafScore), map[string]interface{}{
-						"source":     file.AbsolutePath,
-						"output":     outcome.OutputPath,
-						"vmaf_score": vmafScore,
-						"duration":   outcome.Duration.String(),
+					// If original file was replaced, register the new partial hash so subsequent scans recognize it!
+					if replacedOriginal {
+						if newHash, hashErr := filesystem.ComputePartialHash(file.AbsolutePath); hashErr == nil && newHash != "" && newHash != file.PartialHash {
+							var newSize int64
+							if fi, statErr := os.Stat(file.AbsolutePath); statErr == nil {
+								newSize = fi.Size()
+							}
+							_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
+								SourcePath:       file.AbsolutePath,
+								FileHash:         newHash,
+								FileSize:         newSize,
+								Status:           "completed",
+								OutputPath:       finalOutputPath,
+								VMAFScore:        vmafScore,
+								DurationMs:       outcome.Duration.Milliseconds(),
+								ReplacedOriginal: true,
+							})
+						}
+					}
+
+					msg := fmt.Sprintf("Transcodifica completata con successo: %s (VMAF: %.2f)", filepath.Base(file.AbsolutePath), vmafScore)
+					if replacedOriginal {
+						msg = fmt.Sprintf("Transcodifica completata e file originale sostituito: %s (VMAF: %.2f)", filepath.Base(file.AbsolutePath), vmafScore)
+					}
+
+					broker.Broadcast("transcode_completed", "success", msg, map[string]interface{}{
+						"source":            file.AbsolutePath,
+						"output":            finalOutputPath,
+						"vmaf_score":        vmafScore,
+						"duration":          outcome.Duration.String(),
+						"replaced_original": replacedOriginal,
 					})
 				} else if outcome.Status == transcoder.TranscodeStatusQualityFailed {
 					var vmafScore float64
@@ -453,3 +512,23 @@ func parseLogLevel(s string) observability.Level {
 		return observability.InfoLevel
 	}
 }
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
+}
+

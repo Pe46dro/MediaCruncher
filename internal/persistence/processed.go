@@ -10,17 +10,18 @@ import (
 
 // ProcessedMediaRecord represents a persistent record of an evaluated or transcoded media file.
 type ProcessedMediaRecord struct {
-	ID           int64     `json:"id"`
-	SourcePath   string    `json:"source_path"`
-	FileHash     string    `json:"file_hash"`
-	FileSize     int64     `json:"file_size"`
-	Status       string    `json:"status"` // "completed", "skipped_quality", "ignored", "failed"
-	OutputPath   string    `json:"output_path,omitempty"`
-	VMAFScore    float64   `json:"vmaf_score,omitempty"`
-	DurationMs   int64     `json:"duration_ms,omitempty"`
-	ErrorMessage string    `json:"error_message,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID               int64     `json:"id"`
+	SourcePath       string    `json:"source_path"`
+	FileHash         string    `json:"file_hash"`
+	FileSize         int64     `json:"file_size"`
+	Status           string    `json:"status"` // "completed", "skipped_quality", "ignored", "failed"
+	OutputPath       string    `json:"output_path,omitempty"`
+	VMAFScore        float64   `json:"vmaf_score,omitempty"`
+	DurationMs       int64     `json:"duration_ms,omitempty"`
+	ErrorMessage     string    `json:"error_message,omitempty"`
+	ReplacedOriginal bool      `json:"replaced_original"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 // PersistenceStats represents aggregated statistics of processed files.
@@ -48,7 +49,7 @@ func (e *Engine) GetProcessedMediaByHash(ctx context.Context, hash string) (*Pro
 		`SELECT id, source_path, file_hash, file_size, status,
 		        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 		        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
-		        created_at, updated_at
+		        COALESCE(replaced_original, 0), created_at, updated_at
 		 FROM processed_media
 		 WHERE file_hash = ?
 		 LIMIT 1`,
@@ -57,10 +58,11 @@ func (e *Engine) GetProcessedMediaByHash(ctx context.Context, hash string) (*Pro
 
 	var rec ProcessedMediaRecord
 	var createdAtStr, updatedAtStr string
+	var repOrig int
 	err := row.Scan(
 		&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.FileSize, &rec.Status,
 		&rec.OutputPath, &rec.VMAFScore, &rec.DurationMs, &rec.ErrorMessage,
-		&createdAtStr, &updatedAtStr,
+		&repOrig, &createdAtStr, &updatedAtStr,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -68,6 +70,7 @@ func (e *Engine) GetProcessedMediaByHash(ctx context.Context, hash string) (*Pro
 		}
 		return nil, fmt.Errorf("query processed media by hash: %w", err)
 	}
+	rec.ReplacedOriginal = (repOrig == 1)
 
 	if t, parseErr := time.Parse(time.RFC3339, createdAtStr); parseErr == nil {
 		rec.CreatedAt = t
@@ -89,12 +92,17 @@ func (e *Engine) RecordProcessedMedia(ctx context.Context, rec *ProcessedMediaRe
 		return fmt.Errorf("invalid processed media record: missing hash")
 	}
 
+	repOrigInt := 0
+	if rec.ReplacedOriginal {
+		repOrigInt = 1
+	}
+
 	return e.InTransaction(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO processed_media (
 				source_path, file_hash, file_size, status, output_path,
-				vmaf_score, duration_ms, error_message, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+				vmaf_score, duration_ms, error_message, replaced_original, created_at, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 			ON CONFLICT(file_hash) DO UPDATE SET
 				source_path = excluded.source_path,
 				file_size = excluded.file_size,
@@ -103,9 +111,11 @@ func (e *Engine) RecordProcessedMedia(ctx context.Context, rec *ProcessedMediaRe
 				vmaf_score = excluded.vmaf_score,
 				duration_ms = excluded.duration_ms,
 				error_message = excluded.error_message,
+				replaced_original = excluded.replaced_original,
 				updated_at = datetime('now')`,
 			rec.SourcePath, rec.FileHash, rec.FileSize, rec.Status,
 			rec.OutputPath, rec.VMAFScore, rec.DurationMs, rec.ErrorMessage,
+			repOrigInt,
 		)
 		if err != nil {
 			return fmt.Errorf("upsert processed media: %w", err)
@@ -134,7 +144,7 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 		query = `SELECT id, source_path, file_hash, file_size, status,
 				        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 				        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
-				        created_at, updated_at
+				        COALESCE(replaced_original, 0), created_at, updated_at
 				 FROM processed_media
 				 WHERE status = ?
 				 ORDER BY updated_at DESC LIMIT ? OFFSET ?`
@@ -144,7 +154,7 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 		query = `SELECT id, source_path, file_hash, file_size, status,
 				        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 				        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
-				        created_at, updated_at
+				        COALESCE(replaced_original, 0), created_at, updated_at
 				 FROM processed_media
 				 ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 		args = append(args, limit, offset)
@@ -166,13 +176,15 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 	for rows.Next() {
 		var rec ProcessedMediaRecord
 		var createdAtStr, updatedAtStr string
+		var repOrig int
 		if err := rows.Scan(
 			&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.FileSize, &rec.Status,
 			&rec.OutputPath, &rec.VMAFScore, &rec.DurationMs, &rec.ErrorMessage,
-			&createdAtStr, &updatedAtStr,
+			&repOrig, &createdAtStr, &updatedAtStr,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan processed media row: %w", err)
 		}
+		rec.ReplacedOriginal = (repOrig == 1)
 		if t, parseErr := time.Parse(time.RFC3339, createdAtStr); parseErr == nil {
 			rec.CreatedAt = t
 		} else if t, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr); parseErr == nil {
