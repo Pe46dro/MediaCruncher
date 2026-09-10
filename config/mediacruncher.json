@@ -22,7 +22,7 @@
     "vmaf_threshold": 90.0,
     "max_quality_drop": 10.0,
     "discard_on_quality_loss": true,
-    "replace_existing_file": true,
+    "replace_existing_file": false,
     "preset": "medium",
     "max_encoding_duration": "2h",
     "fallback_to_software": true
