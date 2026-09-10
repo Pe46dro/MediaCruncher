@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // migration represents a single schema migration.
 type migration struct {
@@ -70,6 +70,28 @@ var migrations = []migration{
 			CREATE INDEX IF NOT EXISTS idx_audit_severity ON audit_logs(severity);
 			CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_logs(timestamp);
 			CREATE INDEX IF NOT EXISTS idx_audit_seq ON audit_logs(sequence DESC);
+		`,
+	},
+	{
+		version: 2,
+		sql: `
+			CREATE TABLE IF NOT EXISTS processed_media (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				source_path TEXT NOT NULL,
+				file_hash TEXT NOT NULL UNIQUE,
+				file_size INTEGER NOT NULL,
+				status TEXT NOT NULL,
+				output_path TEXT,
+				vmaf_score REAL,
+				duration_ms INTEGER DEFAULT 0,
+				error_message TEXT,
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+			);
+
+			CREATE INDEX IF NOT EXISTS idx_processed_media_hash ON processed_media(file_hash);
+			CREATE INDEX IF NOT EXISTS idx_processed_media_path ON processed_media(source_path);
+			CREATE INDEX IF NOT EXISTS idx_processed_media_status ON processed_media(status);
 		`,
 	},
 }

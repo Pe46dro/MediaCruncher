@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MediaCruncher — Autonomous Media Daemon</title>
+  <meta name="description" content="Dashboard in tempo reale per MediaCruncher: monitoraggio transcodifiche, deduplicazione hash, verifica qualità VMAF e log eventi.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-layout">
+    <!-- Top Navigation -->
+    <header class="top-nav" id="topNav">
+      <div class="brand-group">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"></polygon>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-title">MediaCruncher</h1>
+          <span class="brand-subtitle">Autonomous Transcoding Engine</span>
+        </div>
+      </div>
+
+      <div class="nav-status-group">
+        <div class="status-indicator" id="daemonStatusBadge">
+          <span class="status-dot"></span>
+          <span class="status-label" id="daemonStatusText">CONNESSIONE...</span>
+        </div>
+        <div class="meta-chip" id="hwAccelChip">
+          <span class="chip-label">ACCEL:</span>
+          <span class="chip-value" id="hwAccelVal">CARICAMENTO</span>
+        </div>
+        <div class="meta-chip" id="uptimeChip">
+          <span class="chip-label">UPTIME:</span>
+          <span class="chip-value" id="uptimeVal">0s</span>
+        </div>
+        <button class="btn btn-primary" id="btnTriggerScan" title="Avvia scansione immediata">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
+          </svg>
+          <span>Scansiona Ora</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <!-- KPI Stats Grid -->
+      <section class="kpi-grid" id="kpiGrid">
+        <div class="kpi-card card-cyan">
+          <div class="kpi-header">
+            <span class="kpi-title">Job Attivi</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiActiveJobs">0</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge" id="kpiWorkerCount">Worker in pool</span>
+          </div>
+        </div>
+
+        <div class="kpi-card card-purple">
+          <div class="kpi-header">
+            <span class="kpi-title">In Coda</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiQueueDepth">0</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge">In attesa di transcode</span>
+          </div>
+        </div>
+
+        <div class="kpi-card card-emerald">
+          <div class="kpi-header">
+            <span class="kpi-title">Completati</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiCompleted">0</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge" id="kpiHashDedupNote">Deduplicati via Hash</span>
+          </div>
+        </div>
+
+        <div class="kpi-card card-amber">
+          <div class="kpi-header">
+            <span class="kpi-title">Qualità Preservata</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiQualityKept">0</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge" id="kpiQualityDropNote">Originali intatti (calo > soglia)</span>
+          </div>
+        </div>
+
+        <div class="kpi-card card-blue">
+          <div class="kpi-header">
+            <span class="kpi-title">Spazio Risparmiato</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiSpaceSaved">0%</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge" id="kpiBytesSaved">0 MB risparmiati</span>
+          </div>
+        </div>
+
+        <div class="kpi-card card-rose">
+          <div class="kpi-header">
+            <span class="kpi-title">VMAF Medio</span>
+            <div class="kpi-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="m4.93 4.93 4.24 4.24"></path><path d="m14.83 9.17 4.24-4.24"></path><path d="m14.83 14.83 4.24 4.24"></path><path d="m9.17 14.83-4.24 4.24"></path><circle cx="12" cy="12" r="4"></circle></svg>
+            </div>
+          </div>
+          <div class="kpi-value" id="kpiAvgVMAF">0.0</div>
+          <div class="kpi-footer">
+            <span class="kpi-badge" id="kpiVMAFThresholdNote">Soglia min: 90.0</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Active Transcodes Live Section -->
+      <section class="section-container" id="activeJobsSection">
+        <div class="section-header">
+          <div class="section-title-group">
+            <span class="pulse-indicator"></span>
+            <h2 class="section-title">Transcodifiche in Corso</h2>
+          </div>
+          <span class="section-count" id="activeJobsCountBadge">0 attive</span>
+        </div>
+
+        <div class="active-jobs-list" id="activeJobsContainer">
+          <div class="empty-state" id="emptyActiveJobs">
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <circle cx="12" cy="12" r="10"></circle>
+              <polyline points="12 6 12 12 14 14"></polyline>
+            </svg>
+            <p class="empty-text">Nessuna transcodifica attiva al momento. Il daemon è in attesa di nuovi video.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Two-column workspace: Media Table + Live Event Console -->
+      <div class="workspace-grid">
+        <!-- Processed Media Table Column -->
+        <section class="section-container table-column">
+          <div class="section-header">
+            <h2 class="section-title">Media Processati & Storico Hash</h2>
+            <div class="table-controls">
+              <div class="search-wrap">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="11" cy="11" r="8"></circle>
+                  <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="text" id="mediaSearchInput" class="search-input" placeholder="Cerca file o hash...">
+              </div>
+            </div>
+          </div>
+
+          <!-- Filter Pills -->
+          <div class="filter-pills" id="statusFilterPills">
+            <button class="pill active" data-filter="all">Tutti (<span id="countAll">0</span>)</button>
+            <button class="pill" data-filter="completed">Completati (<span id="countCompleted">0</span>)</button>
+            <button class="pill" data-filter="skipped_quality">Qualità Preservata (<span id="countSkippedQuality">0</span>)</button>
+            <button class="pill" data-filter="ignored">Ignorati/Conformi (<span id="countIgnored">0</span>)</button>
+            <button class="pill" data-filter="failed">Falliti (<span id="countFailed">0</span>)</button>
+          </div>
+
+          <!-- Media Table -->
+          <div class="table-wrapper">
+            <table class="media-table" id="mediaTable">
+              <thead>
+                <tr>
+                  <th>Nome File / Hash</th>
+                  <th>Dimensione</th>
+                  <th>Stato</th>
+                  <th>Punteggio VMAF</th>
+                  <th>Output / Note</th>
+                  <th>Data</th>
+                </tr>
+              </thead>
+              <tbody id="mediaTableBody">
+                <tr>
+                  <td colspan="6" class="table-loading">Caricamento archivio persistente...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="table-pagination" id="tablePagination">
+            <span class="pagination-info" id="paginationInfo">Mostrati 0 file</span>
+            <div class="pagination-buttons">
+              <button class="btn btn-sm" id="btnPrevPage" disabled>Precedente</button>
+              <button class="btn btn-sm" id="btnNextPage" disabled>Successivo</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Live Streaming Event Console Column -->
+        <section class="section-container log-column">
+          <div class="section-header">
+            <div class="section-title-group">
+              <span class="terminal-dot"></span>
+              <h2 class="section-title">Terminale Eventi in Tempo Reale</h2>
+            </div>
+            <div class="console-actions">
+              <label class="toggle-label" title="Scorri automaticamente all'ultimo log">
+                <input type="checkbox" id="chkAutoScroll" checked>
+                <span>Auto-scroll</span>
+              </label>
+              <button class="btn btn-ghost btn-sm" id="btnClearLog" title="Pulisci terminale">Pulisci</button>
+            </div>
+          </div>
+
+          <div class="terminal-window" id="terminalWindow">
+            <div class="terminal-logs" id="terminalLogs">
+              <div class="log-entry log-info">
+                <span class="log-time">[00:00:00]</span>
+                <span class="log-badge badge-info">SYS</span>
+                <span class="log-msg">Inizializzazione stream eventi SSE... Connessione al daemon in corso.</span>
+              </div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

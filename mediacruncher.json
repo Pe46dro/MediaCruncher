@@ -20,6 +20,8 @@
     "hardware_acceleration": true,
     "target_codec": "h.265",
     "vmaf_threshold": 90.0,
+    "max_quality_drop": 10.0,
+    "discard_on_quality_loss": true,
     "preset": "medium",
     "max_encoding_duration": "2h",
     "fallback_to_software": true
@@ -39,5 +41,10 @@
   "observability": {
     "log_level": "info",
     "metrics_addr": ":9090/metrics"
+  },
+  "web": {
+    "enabled": true,
+    "port": 8080,
+    "addr": "0.0.0.0"
   }
 }

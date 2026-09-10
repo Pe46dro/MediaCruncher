@@ -12,8 +12,11 @@ services:
       - MC_CONFIG_DIR=/app/config
       - MC_DATABASE_PATH=/app/data/mediacruncher.db
       - MC_LOG_LEVEL=info
+      - MC_WEB_ADDR=0.0.0.0:8080
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+    ports:
+      - "8080:8080"
     deploy:
       resources:
         reservations:

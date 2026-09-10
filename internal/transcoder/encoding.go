@@ -20,6 +20,7 @@ type TranscodeJob struct {
 	StagingDir         string            `json:"staging_dir"`
 	JobID              string            `json:"job_id"`
 	VMAFThreshold      float64           `json:"vmaf_threshold"`
+	MaxQualityDrop     float64           `json:"max_quality_drop"`
 	MaxDuration        time.Duration     `json:"max_duration"`
 	Cancellation       context.CancelFunc `json:"-"`
 	Attempt            int               `json:"attempt"`

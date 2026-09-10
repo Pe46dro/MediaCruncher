@@ -18,9 +18,11 @@ type Engine struct {
 	corruptionDetector *CorruptionDetector
 	stagingManager    *StagingManager
 	logger            *observability.Logger
-	vmafThreshold     float64
-	maxEncodingTime   time.Duration
-	binaryPath        string
+	vmafThreshold        float64
+	maxQualityDrop       float64
+	discardOnQualityLoss bool
+	maxEncodingTime      time.Duration
+	binaryPath           string
 }
 
 // Config holds configuration for the transcoder engine.
@@ -28,6 +30,8 @@ type Config struct {
 	HardwareAcceleration bool
 	PreferredDevice      int
 	VMAFThreshold        float64
+	MaxQualityDrop       float64
+	DiscardOnQualityLoss bool
 	MaxEncodingDuration  time.Duration
 	BinaryPath           string
 	StagingDir           string
@@ -39,15 +43,20 @@ func New(cfg Config) *Engine {
 	if cfg.VMAFThreshold <= 0 {
 		cfg.VMAFThreshold = 90.0
 	}
+	if cfg.MaxQualityDrop <= 0 {
+		cfg.MaxQualityDrop = 10.0
+	}
 	if cfg.MaxEncodingDuration <= 0 {
 		cfg.MaxEncodingDuration = 2 * time.Hour
 	}
 
 	eng := &Engine{
-		vmafThreshold:   cfg.VMAFThreshold,
-		maxEncodingTime: cfg.MaxEncodingDuration,
-		binaryPath:      cfg.BinaryPath,
-		logger:          cfg.Logger,
+		vmafThreshold:        cfg.VMAFThreshold,
+		maxQualityDrop:       cfg.MaxQualityDrop,
+		discardOnQualityLoss: cfg.DiscardOnQualityLoss,
+		maxEncodingTime:      cfg.MaxEncodingDuration,
+		binaryPath:           cfg.BinaryPath,
+		logger:               cfg.Logger,
 	}
 
 	if eng.logger == nil {
@@ -177,17 +186,30 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 	vmafResult := e.vmafVerifier.VerifyWithFallback(ctx, job.SourcePath, encodingResult.OutputPath)
 	outcome.Verification = vmafResult
 
-	if !vmafResult.Passed {
+	effectiveThreshold := e.vmafThreshold
+	if job.VMAFThreshold > 0 {
+		effectiveThreshold = job.VMAFThreshold
+	}
+	effectiveMaxDrop := e.maxQualityDrop
+	if job.MaxQualityDrop > 0 {
+		effectiveMaxDrop = job.MaxQualityDrop
+	}
+
+	qualityDrop := 100.0 - vmafResult.VMAFScore
+	qualityFailed := vmafResult.VMAFScore < effectiveThreshold || (effectiveMaxDrop > 0 && qualityDrop > effectiveMaxDrop)
+
+	if qualityFailed {
 		if !job.IsRetry {
 			retryJob := &TranscodeJob{
-				JobID:         job.JobID,
-				SourcePath:    job.SourcePath,
-				OutputPath:    job.OutputPath,
-				StagingDir:    stagingDir,
-				VMAFThreshold: job.VMAFThreshold,
-				MaxDuration:   job.MaxDuration,
-				Attempt:       job.Attempt + 1,
-				IsRetry:       true,
+				JobID:          job.JobID,
+				SourcePath:     job.SourcePath,
+				OutputPath:     job.OutputPath,
+				StagingDir:     stagingDir,
+				VMAFThreshold:  effectiveThreshold,
+				MaxQualityDrop: effectiveMaxDrop,
+				MaxDuration:    job.MaxDuration,
+				Attempt:        job.Attempt + 1,
+				IsRetry:        true,
 			}
 			if job.Preset != nil {
 				p := *job.Preset
@@ -211,8 +233,25 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 			outcome.Duration = time.Since(start)
 			return outcome
 		}
+
 		outcome.Status = TranscodeStatusQualityFailed
-		e.stagingManager.Preserve(job.JobID)
+		outcome.Error = fmt.Sprintf("quality loss exceeded threshold: VMAF %.2f (min %.2f), drop %.2f (max allowed: %.2f)", vmafResult.VMAFScore, effectiveThreshold, qualityDrop, effectiveMaxDrop)
+
+		if e.discardOnQualityLoss {
+			if e.logger != nil {
+				e.logger.WithFields(
+					observability.Field{Key: "job_id", Value: job.JobID},
+					observability.Field{Key: "vmaf_score", Value: vmafResult.VMAFScore},
+					observability.Field{Key: "quality_drop", Value: qualityDrop},
+				).Warn("video quality drop exceeded threshold, deleting processed video and keeping original")
+			}
+			e.stagingManager.Cleanup(job.JobID)
+			if job.OutputPath != "" {
+				_ = os.Remove(job.OutputPath)
+			}
+		} else {
+			e.stagingManager.Preserve(job.JobID)
+		}
 		return outcome
 	}
 

@@ -17,6 +17,7 @@ import (
 	"mediacruncher/internal/observability"
 	"mediacruncher/internal/persistence"
 	"mediacruncher/internal/transcoder"
+	"mediacruncher/internal/web"
 )
 
 func main() {
@@ -82,6 +83,8 @@ func main() {
 		HardwareAcceleration: cfg.Transcoder.HardwareAcceleration,
 		PreferredDevice:      cfg.Transcoder.PreferredDevice,
 		VMAFThreshold:        cfg.Transcoder.VMAFThreshold,
+		MaxQualityDrop:       cfg.Transcoder.MaxQualityDrop,
+		DiscardOnQualityLoss: cfg.Transcoder.DiscardOnQualityLoss,
 		MaxEncodingDuration:  maxEncDur,
 		StagingDir:           stagingDir,
 		Logger:               logger,
@@ -107,19 +110,56 @@ func main() {
 	}
 	health.SetModuleStatus("filesystem", "healthy")
 
+	// 5. Initialize Real-Time Web Server & SSE Broker
+	broker := web.NewBroker()
+	stateTracker := web.NewStateTracker()
+	hwAccelName := "Software (CPU)"
+	if cfg.Transcoder.HardwareAcceleration {
+		hwAccelName = "Hardware Acceleration"
+	}
+	stateTracker.SetSystemInfo(hwAccelName, cfg.Transcoder.TargetCodec, cfg.Transcoder.VMAFThreshold, cfg.Transcoder.MaxQualityDrop)
+
+	var processScan func()
+	var scanMu sync.Mutex
+
+	if cfg.Web.Enabled {
+		webAddr := cfg.Web.ListenAddr()
+		webServer := web.NewServer(web.Config{
+			Addr:            webAddr,
+			Broker:          broker,
+			State:           stateTracker,
+			Persistence:     db,
+			TriggerScanFunc: func() { processScan() },
+			Logger:          logger,
+		})
+		if err := webServer.Start(); err != nil {
+			logger.WithFields(observability.Field{Key: "error", Value: err}).Error("failed to start web dashboard server")
+		} else {
+			logger.WithFields(observability.Field{Key: "addr", Value: webAddr}).Info("real-time web dashboard running")
+		}
+		defer func() {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer shutdownCancel()
+			_ = webServer.Shutdown(shutdownCtx)
+		}()
+	}
+
 	logger.WithFields(
 		observability.Field{Key: "workers", Value: cfg.Concurrency.WorkerCount},
 		observability.Field{Key: "queue_capacity", Value: cfg.Concurrency.QueueCapacity},
 		observability.Field{Key: "database", Value: cfg.Persistence.DatabasePath},
 		observability.Field{Key: "scopes", Value: len(fsScopes)},
+		observability.Field{Key: "vmaf_threshold", Value: cfg.Transcoder.VMAFThreshold},
+		observability.Field{Key: "max_quality_drop", Value: cfg.Transcoder.MaxQualityDrop},
+		observability.Field{Key: "discard_on_quality_loss", Value: cfg.Transcoder.DiscardOnQualityLoss},
 	).Info("mediacruncher daemon initialized")
 
-	processedFiles := make(map[string]bool)
-	var mu sync.Mutex
+	processScan = func() {
+		scanMu.Lock()
+		defer scanMu.Unlock()
 
-	processScan := func() {
-		mu.Lock()
-		defer mu.Unlock()
+		stateTracker.SetStatus("scanning")
+		broker.Broadcast("scan_started", "info", "Scansione filesystem avviata...", nil)
 
 		fsEngine := filesystem.New(filesystem.Config{
 			Scopes: fsScopes,
@@ -128,8 +168,16 @@ func main() {
 		disc, err := fsEngine.Scan(ctx)
 		if err != nil {
 			logger.WithFields(observability.Field{Key: "error", Value: err}).Error("filesystem scan failed")
+			broker.Broadcast("scan_failed", "error", fmt.Sprintf("Errore scansione: %v", err), nil)
+			stateTracker.SetStatus("idle")
 			return
 		}
+
+		stateTracker.RecordScanCompleted()
+		broker.Broadcast("scan_completed", "info", fmt.Sprintf("Scansione completata: %d file scoperti, %d accettati", disc.TotalDiscovered, disc.TotalAccepted), map[string]interface{}{
+			"discovered": disc.TotalDiscovered,
+			"accepted":   disc.TotalAccepted,
+		})
 
 		if disc.TotalDiscovered > 0 {
 			logger.WithFields(
@@ -139,19 +187,38 @@ func main() {
 		}
 
 		for _, file := range disc.Files {
-			if processedFiles[file.AbsolutePath] {
+			// Skip files already created as optimized outputs
+			if strings.Contains(file.AbsolutePath, "_optimized") {
 				continue
 			}
-			// Skip already transcoded files
-			if strings.Contains(file.AbsolutePath, "_optimized") {
-				processedFiles[file.AbsolutePath] = true
-				continue
+
+			// 1. Persistent Deduplication via Hash check in SQLite
+			if file.PartialHash != "" {
+				processedRec, checkErr := db.GetProcessedMediaByHash(ctx, file.PartialHash)
+				if checkErr == nil && processedRec != nil {
+					// File already processed in a previous run (survives docker compose restart!)
+					if processedRec.Status == "completed" || processedRec.Status == "skipped_quality" || processedRec.Status == "ignored" {
+						logger.WithFields(
+							observability.Field{Key: "path", Value: file.AbsolutePath},
+							observability.Field{Key: "hash", Value: file.PartialHash},
+							observability.Field{Key: "status", Value: processedRec.Status},
+						).Debug("video already processed with matching hash, skipping")
+						continue
+					}
+				}
 			}
 
 			logger.WithFields(
 				observability.Field{Key: "path", Value: file.AbsolutePath},
 				observability.Field{Key: "size_bytes", Value: file.Size},
+				observability.Field{Key: "hash", Value: file.PartialHash},
 			).Info("evaluating media file")
+
+			broker.Broadcast("file_discovered", "info", fmt.Sprintf("Valutazione file: %s", filepath.Base(file.AbsolutePath)), map[string]interface{}{
+				"path": file.AbsolutePath,
+				"size": file.Size,
+				"hash": file.PartialHash,
+			})
 
 			queueID, err := db.Enqueue(ctx, file.AbsolutePath, persistence.PriorityNormal)
 			if err != nil {
@@ -161,6 +228,7 @@ func main() {
 			decision, err := evalEngine.AnalyzeFile(ctx, file.AbsolutePath, queueID)
 			if err != nil {
 				logger.WithFields(observability.Field{Key: "error", Value: err}).Error("evaluation failed")
+				broker.Broadcast("evaluation_failed", "error", fmt.Sprintf("Valutazione fallita per %s: %v", filepath.Base(file.AbsolutePath), err), nil)
 				continue
 			}
 
@@ -186,11 +254,12 @@ func main() {
 				}
 
 				job := &transcoder.TranscodeJob{
-					JobID:         jobID,
-					SourcePath:    file.AbsolutePath,
-					OutputPath:    outputPath,
-					VMAFThreshold: cfg.Transcoder.VMAFThreshold,
-					MaxDuration:   maxEncDur,
+					JobID:          jobID,
+					SourcePath:     file.AbsolutePath,
+					OutputPath:     outputPath,
+					VMAFThreshold:  cfg.Transcoder.VMAFThreshold,
+					MaxQualityDrop: cfg.Transcoder.MaxQualityDrop,
+					MaxDuration:    maxEncDur,
 					Preset: &transcoder.EncodingPreset{
 						TargetCodec:          targetCodec,
 						QualityLevel:         23,
@@ -201,28 +270,123 @@ func main() {
 					},
 				}
 
+				// Register active job in real-time tracker
+				stateTracker.AddActiveJob(&web.ActiveJob{
+					JobID:         jobID,
+					SourcePath:    file.AbsolutePath,
+					FileName:      filepath.Base(file.AbsolutePath),
+					TargetCodec:   targetCodec,
+					Preset:        cfg.Transcoder.VPreset,
+					Stage:         "transcoding",
+					StartTime:     time.Now(),
+					WorkerID:      "worker-1",
+					EstimatedProg: 25,
+				})
+
+				broker.Broadcast("transcode_started", "info", fmt.Sprintf("Inizio transcodifica: %s -> %s", filepath.Base(file.AbsolutePath), targetCodec), map[string]interface{}{
+					"job_id": jobID,
+					"source": file.AbsolutePath,
+					"target": targetCodec,
+				})
+
 				outcome := transEngine.Transcode(ctx, job)
+				stateTracker.RemoveActiveJob(jobID)
+
 				if outcome.Status == transcoder.TranscodeStatusCompleted {
+					var vmafScore float64
+					if outcome.Verification != nil {
+						vmafScore = outcome.Verification.VMAFScore
+					}
+
 					logger.WithFields(
 						observability.Field{Key: "output", Value: outcome.OutputPath},
 						observability.Field{Key: "duration", Value: outcome.Duration.String()},
+						observability.Field{Key: "vmaf_score", Value: vmafScore},
 					).Info("transcoding completed successfully")
+
 					if queueID > 0 {
 						_ = db.Complete(ctx, queueID, 0)
 					}
-					processedFiles[file.AbsolutePath] = true
-					processedFiles[outputPath] = true
+
+					// Persist completed record in SQLite with hash!
+					_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
+						SourcePath: file.AbsolutePath,
+						FileHash:   file.PartialHash,
+						FileSize:   file.Size,
+						Status:     "completed",
+						OutputPath: outcome.OutputPath,
+						VMAFScore:  vmafScore,
+						DurationMs: outcome.Duration.Milliseconds(),
+					})
+
+					broker.Broadcast("transcode_completed", "success", fmt.Sprintf("Transcodifica completata con successo: %s (VMAF: %.2f)", filepath.Base(file.AbsolutePath), vmafScore), map[string]interface{}{
+						"source":     file.AbsolutePath,
+						"output":     outcome.OutputPath,
+						"vmaf_score": vmafScore,
+						"duration":   outcome.Duration.String(),
+					})
+				} else if outcome.Status == transcoder.TranscodeStatusQualityFailed {
+					var vmafScore float64
+					if outcome.Verification != nil {
+						vmafScore = outcome.Verification.VMAFScore
+					}
+
+					logger.WithFields(
+						observability.Field{Key: "status", Value: outcome.Status},
+						observability.Field{Key: "vmaf_score", Value: vmafScore},
+						observability.Field{Key: "error", Value: outcome.Error},
+					).Warn("transcoding rejected due to excessive quality loss: output deleted, original preserved")
+
+					if queueID > 0 {
+						_ = db.Fail(ctx, queueID, outcome.Error)
+					}
+
+					// Ensure output file is deleted if created
+					if outputPath != "" {
+						_ = os.Remove(outputPath)
+					}
+
+					// Persist skipped_quality status with hash so it is NEVER re-evaluated or re-transcoded again!
+					_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
+						SourcePath:   file.AbsolutePath,
+						FileHash:     file.PartialHash,
+						FileSize:     file.Size,
+						Status:       "skipped_quality",
+						VMAFScore:    vmafScore,
+						DurationMs:   outcome.Duration.Milliseconds(),
+						ErrorMessage: outcome.Error,
+					})
+
+					broker.Broadcast("quality_rejected", "warning", fmt.Sprintf("Qualità insufficiente per %s (VMAF %.2f): originale preservato e output cancellato", filepath.Base(file.AbsolutePath), vmafScore), map[string]interface{}{
+						"source":     file.AbsolutePath,
+						"vmaf_score": vmafScore,
+						"reason":     outcome.Error,
+					})
 				} else {
 					logger.WithFields(
 						observability.Field{Key: "status", Value: outcome.Status},
 						observability.Field{Key: "error", Value: outcome.Error},
 					).Error("transcoding failed")
+
 					if queueID > 0 {
 						_ = db.Fail(ctx, queueID, outcome.Error)
 					}
+
+					broker.Broadcast("transcode_failed", "error", fmt.Sprintf("Transcodifica fallita per %s: %s", filepath.Base(file.AbsolutePath), outcome.Error), map[string]interface{}{
+						"source": file.AbsolutePath,
+						"error":  outcome.Error,
+					})
 				}
 			} else {
-				processedFiles[file.AbsolutePath] = true
+				// Decision is not transcode (e.g. copy, ignore)
+				// Record as ignored so on subsequent runs we don't re-probe
+				_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
+					SourcePath:   file.AbsolutePath,
+					FileHash:     file.PartialHash,
+					FileSize:     file.Size,
+					Status:       "ignored",
+					ErrorMessage: fmt.Sprintf("rule decision: %s", decision.Action),
+				})
 			}
 		}
 	}
@@ -230,7 +394,7 @@ func main() {
 	// Run initial scan and periodic ticker
 	go func() {
 		processScan()
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
 			select {
@@ -289,4 +453,3 @@ func parseLogLevel(s string) observability.Level {
 		return observability.InfoLevel
 	}
 }
-

@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,11 +50,45 @@ type TranscoderSettings struct {
 	HardwareAcceleration bool    `json:"hardware_acceleration"`
 	PreferredDevice      int     `json:"preferred_device"`
 	VMAFThreshold        float64 `json:"vmaf_threshold"`
+	MaxQualityDrop       float64 `json:"max_quality_drop"`
+	DiscardOnQualityLoss bool    `json:"discard_on_quality_loss"`
 	VPreset              string  `json:"preset"`
 	MaxEncodingDuration  string  `json:"max_encoding_duration"`
 	FallbackToSoftware   bool    `json:"fallback_to_software"`
 	TargetCodec          string  `json:"target_codec,omitempty"`
 	Codec                string  `json:"codec,omitempty"`
+}
+
+// WebSettings holds the HTTP and real-time dashboard server configuration.
+type WebSettings struct {
+	Enabled bool   `json:"enabled"`
+	Port    int    `json:"port"`
+	Addr    string `json:"addr"`
+}
+
+// ListenAddr returns the resolved TCP address to listen on based on Addr and Port.
+func (w *WebSettings) ListenAddr() string {
+	port := w.Port
+	if port <= 0 {
+		port = 8080
+	}
+
+	addr := strings.TrimSpace(w.Addr)
+	if addr == "" {
+		return fmt.Sprintf("0.0.0.0:%d", port)
+	}
+
+	if strings.Contains(addr, ":") {
+		if w.Port > 0 {
+			host, _, err := net.SplitHostPort(addr)
+			if err == nil {
+				return fmt.Sprintf("%s:%d", host, w.Port)
+			}
+		}
+		return addr
+	}
+
+	return fmt.Sprintf("%s:%d", addr, port)
 }
 
 // ConcurrencySettings holds worker pool configuration.
@@ -103,6 +138,7 @@ type Config struct {
 	Concurrency   ConcurrencySettings    `json:"concurrency"`
 	Notification  NotificationSettings   `json:"notification"`
 	Observability ObservabilitySettings  `json:"observability"`
+	Web           WebSettings            `json:"web"`
 }
 
 // DefaultConfig returns a Config with all built-in defaults applied.
@@ -124,6 +160,8 @@ func DefaultConfig() Config {
 			HardwareAcceleration: true,
 			PreferredDevice:      0,
 			VMAFThreshold:        90.0,
+			MaxQualityDrop:       10.0,
+			DiscardOnQualityLoss: true,
 			VPreset:              "medium",
 			MaxEncodingDuration:  "2h",
 			FallbackToSoftware:   true,
@@ -150,6 +188,11 @@ func DefaultConfig() Config {
 			LogLevel:          "info",
 			MetricsAddr:       "127.0.0.1:9090/metrics",
 			EnableHealthCheck: true,
+		},
+		Web: WebSettings{
+			Enabled: true,
+			Port:    8080,
+			Addr:    "0.0.0.0",
 		},
 	}
 }
@@ -243,6 +286,25 @@ func applyEnv(cfg *Config) {
 		if f := parseFloat(v); f > 0 {
 			cfg.Transcoder.VMAFThreshold = f
 		}
+	}
+	if v := os.Getenv(envPrefix + "MAX_QUALITY_DROP"); v != "" {
+		if f := parseFloat(v); f > 0 {
+			cfg.Transcoder.MaxQualityDrop = f
+		}
+	}
+	if v := os.Getenv(envPrefix + "DISCARD_ON_QUALITY_LOSS"); v != "" {
+		cfg.Transcoder.DiscardOnQualityLoss = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv(envPrefix + "WEB_ENABLED"); v != "" {
+		cfg.Web.Enabled = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv(envPrefix + "WEB_PORT"); v != "" {
+		if n := parseInt(v); n > 0 {
+			cfg.Web.Port = n
+		}
+	}
+	if v := os.Getenv(envPrefix + "WEB_ADDR"); v != "" {
+		cfg.Web.Addr = v
 	}
 	if v := os.Getenv(envPrefix + "DEFAULT_ACTION"); v != "" {
 		cfg.Evaluation.DefaultAction = v
@@ -405,6 +467,12 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Transcoder.VMAFThreshold < 0 || cfg.Transcoder.VMAFThreshold > 100 {
 		return fmt.Errorf("transcoder.vmaf_threshold: must be between 0 and 100, got %f", cfg.Transcoder.VMAFThreshold)
+	}
+	if cfg.Transcoder.MaxQualityDrop < 0 || cfg.Transcoder.MaxQualityDrop > 100 {
+		return fmt.Errorf("transcoder.max_quality_drop: must be between 0 and 100, got %f", cfg.Transcoder.MaxQualityDrop)
+	}
+	if cfg.Web.Port < 0 || cfg.Web.Port > 65535 {
+		return fmt.Errorf("web.port: invalid port %d, must be between 1 and 65535", cfg.Web.Port)
 	}
 	switch cfg.Evaluation.DefaultAction {
 	case "transcode", "stream_copy", "skip", "review":
