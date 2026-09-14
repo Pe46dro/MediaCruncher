@@ -100,9 +100,17 @@ flowchart TD
 8. **`internal/web`**:
    - Embedded single-page web application (`internal/web/static/` via `go:embed`).
    - Server-Sent Events (SSE) broker (`/events`) streaming real-time queue states, active jobs, logs, and progress.
+   - **Queue Control & Monitoring:**
+     - Live visualization of exact transcoding stages: `analyzing` (Analisi ffprobe & Regole), `transcoding` (Decodifica sorgente & Ottimizzazione H.265/NVENC), `verifying_vmaf` (Calcolo VMAF qualità), `checking_corruption` (Verifica integrità), `finalizing` (Commit & Sostituzione).
+     - Individual job cancellation (`Stop / Salta`): users can interrupt an active video encoding from the UI (`/api/jobs/cancel?job_id=...`). The active worker kills the underlying FFmpeg process, cleans up temp staging, and seamlessly proceeds to the next video in queue.
+     - Global daemon pause/resume (`Pausa Coda` / `Riprendi Coda`): users can toggle queue consumption (`/api/pause` and `/api/resume`) without stopping the daemon process.
    - REST API endpoints:
      - `/api/status`: System hardware profile, runtime stats, disk savings, and queue depths.
-     - `/api/jobs`: Currently active transcoding workers and progress.
+     - `/api/jobs`: Currently active transcoding workers, detailed stage explanations, and progress.
+     - `/api/jobs/cancel?job_id=...`: Stop/skip an active job and proceed to next items.
+     - `/api/pause`: Pause processing of new files from queue.
+     - `/api/resume`: Resume processing files from queue.
+     - `/api/queue`: List pending queue entries and active jobs.
      - `/api/media`: Paginated SQLite records with filter pills (`all`, `completed`, `skipped_quality`, `ignored`, `failed`).
      - `/api/scan`: Trigger manual re-scan.
 

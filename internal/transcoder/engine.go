@@ -132,6 +132,20 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 
 	job.NegotiatedCodec = negotiation.NegotiatedCodec
 
+	if job.StageCallback != nil {
+		accel := "CPU/Software"
+		codecName := "h.265"
+		if job.NegotiatedCodec != nil {
+			if job.NegotiatedCodec.Codec != "" {
+				codecName = job.NegotiatedCodec.Codec
+			}
+			if job.NegotiatedCodec.Acceleration != "sw" {
+				accel = fmt.Sprintf("Hardware (%s)", job.NegotiatedCodec.Acceleration)
+			}
+		}
+		job.StageCallback("transcoding", fmt.Sprintf("Decodifica sorgente & Ottimizzazione in %s via %s", codecName, accel), 35)
+	}
+
 	encodingCtx, cancel := context.WithTimeout(ctx, e.maxEncodingTime)
 	defer cancel()
 	job.Cancellation = cancel
@@ -148,6 +162,9 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 					observability.Field{Key: "job_id", Value: job.JobID},
 				).Warn("hardware encoding failed, retrying with software fallback")
 			}
+			if job.StageCallback != nil {
+				job.StageCallback("transcoding", "Fallback su decodifica/codifica software CPU", 20)
+			}
 			retryJob := &TranscodeJob{
 				JobID:         job.JobID,
 				SourcePath:    job.SourcePath,
@@ -157,6 +174,7 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 				MaxDuration:   job.MaxDuration,
 				Attempt:       job.Attempt + 1,
 				IsRetry:       true,
+				StageCallback: job.StageCallback,
 			}
 			if job.Preset != nil {
 				p := *job.Preset
@@ -188,6 +206,14 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 		return outcome
 	}
 
+	if job.StageCallback != nil {
+		detail := "Calcolo metrica VMAF (confronto qualità video sorgente/output)"
+		if e.vmafVerifier != nil && e.vmafVerifier.config.SampleSegments > 0 {
+			detail = fmt.Sprintf("Calcolo VMAF campionato (%d segmenti da %ds)", e.vmafVerifier.config.SampleSegments, e.vmafVerifier.config.SampleDuration)
+		}
+		job.StageCallback("verifying_vmaf", detail, 75)
+	}
+
 	vmafResult := e.vmafVerifier.VerifyWithFallback(ctx, job.SourcePath, encodingResult.OutputPath)
 	outcome.Verification = vmafResult
 
@@ -205,6 +231,9 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 
 	if qualityFailed {
 		if !job.IsRetry {
+			if job.StageCallback != nil {
+				job.StageCallback("transcoding", "Retry automatico con parametri di qualità più elevati", 30)
+			}
 			retryJob := &TranscodeJob{
 				JobID:          job.JobID,
 				SourcePath:     job.SourcePath,
@@ -215,6 +244,7 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 				MaxDuration:    job.MaxDuration,
 				Attempt:        job.Attempt + 1,
 				IsRetry:        true,
+				StageCallback:  job.StageCallback,
 			}
 			if job.Preset != nil {
 				p := *job.Preset
@@ -260,11 +290,19 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 		return outcome
 	}
 
+	if job.StageCallback != nil {
+		job.StageCallback("checking_corruption", "Controllo corruzione stream e integrità contenitore", 90)
+	}
+
 	if ok, msg := e.corruptionDetector.CheckAndReport(ctx, encodingResult.OutputPath); !ok {
 		outcome.Status = TranscodeStatusFailed
 		outcome.Error = msg
 		e.stagingManager.Preserve(job.JobID)
 		return outcome
+	}
+
+	if job.StageCallback != nil {
+		job.StageCallback("finalizing", "Commit staging e finalizzazione file su disco", 95)
 	}
 
 	if err := e.stagingManager.Commit(stagingDir, job.OutputPath); err != nil {

@@ -202,6 +202,44 @@ body {
   transform: translateY(0);
 }
 
+.btn-warning {
+  background: rgba(245, 158, 11, 0.15);
+  color: #FBBF24;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  box-shadow: 0 2px 10px rgba(245, 158, 11, 0.15);
+}
+
+.btn-warning:hover {
+  background: rgba(245, 158, 11, 0.25);
+  border-color: #F59E0B;
+  transform: translateY(-1px);
+}
+
+.btn-warning.is-paused {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34D399;
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.btn-warning.is-paused:hover {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: #10B981;
+}
+
+.btn-danger {
+  background: rgba(239, 68, 68, 0.15);
+  color: #F87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  box-shadow: 0 2px 10px rgba(239, 68, 68, 0.15);
+}
+
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #EF4444;
+  color: #fff;
+  transform: translateY(-1px);
+}
+
 .btn-icon {
   width: 16px;
   height: 16px;
@@ -484,8 +522,41 @@ body {
 .progress-labels {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 0.75rem;
   color: var(--text-muted);
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.job-stage-desc {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8125rem;
+  color: #E2E8F0;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 0.4rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border-left: 3px solid var(--cyan-primary);
+}
+
+.job-stage-desc.stage-verifying_vmaf {
+  border-left-color: var(--purple-accent);
+}
+
+.job-stage-desc.stage-checking_corruption {
+  border-left-color: var(--amber-warning);
+}
+
+.job-stage-desc.stage-finalizing {
+  border-left-color: var(--emerald-success);
+}
+
+.job-actions-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .empty-state {

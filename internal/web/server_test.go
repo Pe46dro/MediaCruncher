@@ -107,6 +107,50 @@ func TestWebServerEndpoints(t *testing.T) {
 		t.Error("timed out waiting for SSE message")
 	}
 
+	// 6. Test Pause & Resume APIs
+	pauseReq := httptest.NewRequest(http.MethodPost, "/api/pause", nil)
+	pauseRec := httptest.NewRecorder()
+	srv.handlePause(pauseRec, pauseReq)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/pause, got %d", pauseRec.Code)
+	}
+	if !state.IsPaused() {
+		t.Error("expected state to be paused")
+	}
+
+	resumeReq := httptest.NewRequest(http.MethodPost, "/api/resume", nil)
+	resumeRec := httptest.NewRecorder()
+	srv.handleResume(resumeRec, resumeReq)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/resume, got %d", resumeRec.Code)
+	}
+	if state.IsPaused() {
+		t.Error("expected state to be resumed")
+	}
+
+	// 7. Test Cancel Job
+	var cancelled atomic.Bool
+	state.RegisterJobCancel("test-job-1", func() {
+		cancelled.Store(true)
+	})
+	cancelReq := httptest.NewRequest(http.MethodPost, "/api/jobs/cancel?job_id=test-job-1", nil)
+	cancelRec := httptest.NewRecorder()
+	srv.handleCancelJob(cancelRec, cancelReq)
+	if cancelRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/jobs/cancel, got %d", cancelRec.Code)
+	}
+	if !cancelled.Load() {
+		t.Error("expected cancel callback to be invoked")
+	}
+
+	// 8. Test Queue Endpoint
+	queueReq := httptest.NewRequest(http.MethodGet, "/api/queue", nil)
+	queueRec := httptest.NewRecorder()
+	srv.handleQueue(queueRec, queueReq)
+	if queueRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /api/queue, got %d", queueRec.Code)
+	}
+
 	// Test graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()

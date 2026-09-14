@@ -68,6 +68,10 @@ func NewServer(cfg Config) *Server {
 	// REST APIs
 	mux.HandleFunc("/api/status", s.handleStatus)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
+	mux.HandleFunc("/api/jobs/cancel", s.handleCancelJob)
+	mux.HandleFunc("/api/pause", s.handlePause)
+	mux.HandleFunc("/api/resume", s.handleResume)
+	mux.HandleFunc("/api/queue", s.handleQueue)
 	mux.HandleFunc("/api/media", s.handleMedia)
 	mux.HandleFunc("/api/events", s.handleEvents)
 	mux.HandleFunc("/api/scan", s.handleScanTrigger)
@@ -262,4 +266,102 @@ func (s *Server) handleScanTrigger(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "scan_triggered"})
+}
+
+// handlePause pauses the daemon processing.
+func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.state != nil {
+		s.state.Pause()
+	}
+	if s.broker != nil {
+		s.broker.Broadcast("daemon_paused", "warning", "Daemon messo in pausa dall'interfaccia web", nil)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "paused", "is_paused": true})
+}
+
+// handleResume resumes the daemon processing.
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.state != nil {
+		s.state.Resume()
+	}
+	if s.broker != nil {
+		s.broker.Broadcast("daemon_resumed", "info", "Daemon riattivato dall'interfaccia web", nil)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"status": "resumed", "is_paused": false})
+}
+
+// handleCancelJob cancels a running job by job_id.
+func (s *Server) handleCancelJob(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, `{"error":"missing job_id parameter"}`, http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if s.state != nil {
+		cancelled := s.state.CancelJob(jobID)
+		if cancelled {
+			if s.broker != nil {
+				s.broker.Broadcast("job_cancelled", "warning", fmt.Sprintf("Job interrotto manualmente dall'utente: %s", jobID), map[string]interface{}{
+					"job_id": jobID,
+				})
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"status": "cancelled", "job_id": jobID})
+			return
+		}
+	}
+
+	http.Error(w, `{"error":"job not found or already finished"}`, http.StatusNotFound)
+}
+
+// handleQueue returns pending entries and active jobs for queue inspection.
+func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	var active []*ActiveJob
+	if s.state != nil {
+		active = s.state.GetActiveJobs()
+	}
+	if active == nil {
+		active = []*ActiveJob{}
+	}
+
+	var pending []persistence.QueueEntry
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		defer cancel()
+		if p, err := s.db.ListPendingEntries(ctx, 50); err == nil {
+			pending = p
+		}
+	}
+	if pending == nil {
+		pending = []persistence.QueueEntry{}
+	}
+
+	isPaused := false
+	if s.state != nil {
+		isPaused = s.state.IsPaused()
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"is_paused": isPaused,
+		"active":    active,
+		"pending":   pending,
+		"total_pending": len(pending),
+	})
 }

@@ -205,6 +205,15 @@ func main() {
 		}
 
 		for _, file := range disc.Files {
+			// Check if processing is paused
+			for stateTracker.IsPaused() {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(500 * time.Millisecond):
+				}
+			}
+
 			// Skip files already created as optimized outputs
 			if strings.Contains(file.AbsolutePath, "_optimized") {
 				continue
@@ -277,6 +286,9 @@ func main() {
 					targetCodec = "h.265"
 				}
 
+				jobCtx, jobCancel := context.WithCancel(ctx)
+				stateTracker.RegisterJobCancel(jobID, jobCancel)
+
 				job := &transcoder.TranscodeJob{
 					JobID:          jobID,
 					SourcePath:     file.AbsolutePath,
@@ -292,6 +304,15 @@ func main() {
 						HardwareAcceleration: cfg.Transcoder.HardwareAcceleration,
 						PreferredDevice:      cfg.Transcoder.PreferredDevice,
 					},
+					StageCallback: func(stage, detail string, progress int) {
+						stateTracker.UpdateJobStage(jobID, stage, detail, progress)
+						broker.Broadcast("job_stage_changed", "info", fmt.Sprintf("[%s] %s", filepath.Base(file.AbsolutePath), detail), map[string]interface{}{
+							"job_id":   jobID,
+							"stage":    stage,
+							"detail":   detail,
+							"progress": progress,
+						})
+					},
 				}
 
 				// Register active job in real-time tracker
@@ -302,9 +323,10 @@ func main() {
 					TargetCodec:   targetCodec,
 					Preset:        cfg.Transcoder.VPreset,
 					Stage:         "transcoding",
+					StageDetail:   fmt.Sprintf("Avvio pipeline di transcodifica (%s)", targetCodec),
 					StartTime:     time.Now(),
 					WorkerID:      "worker-1",
-					EstimatedProg: 25,
+					EstimatedProg: 15,
 				})
 
 				broker.Broadcast("transcode_started", "info", fmt.Sprintf("Inizio transcodifica: %s -> %s", filepath.Base(file.AbsolutePath), targetCodec), map[string]interface{}{
@@ -313,8 +335,29 @@ func main() {
 					"target": targetCodec,
 				})
 
-				outcome := transEngine.Transcode(ctx, job)
+				outcome := transEngine.Transcode(jobCtx, job)
+				jobCancel() // Release job context
 				stateTracker.RemoveActiveJob(jobID)
+
+				// Check if job was cancelled
+				if jobCtx.Err() != nil {
+					logger.WithFields(
+						observability.Field{Key: "source", Value: file.AbsolutePath},
+						observability.Field{Key: "job_id", Value: jobID},
+					).Warn("job was cancelled by user: skipping to next item")
+
+					if queueID > 0 {
+						_ = db.Fail(ctx, queueID, "cancelled by user")
+					}
+					if outputPath != "" {
+						_ = os.Remove(outputPath)
+					}
+					broker.Broadcast("job_skipped", "warning", fmt.Sprintf("Transcodifica annullata dall'utente per %s: passaggio al file successivo", filepath.Base(file.AbsolutePath)), map[string]interface{}{
+						"source": file.AbsolutePath,
+						"job_id": jobID,
+					})
+					continue
+				}
 
 				if outcome.Status == transcoder.TranscodeStatusCompleted {
 					// Check if transcoded output is larger than original

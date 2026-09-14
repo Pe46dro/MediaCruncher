@@ -16,6 +16,11 @@
   const hwAccelVal = document.getElementById('hwAccelVal');
   const uptimeVal = document.getElementById('uptimeVal');
   const btnTriggerScan = document.getElementById('btnTriggerScan');
+  const btnTogglePause = document.getElementById('btnTogglePause');
+  const pauseBtnText = document.getElementById('pauseBtnText');
+  const pauseBtnIcon = document.getElementById('pauseBtnIcon');
+
+  let isDaemonPaused = false;
 
   // KPI Elements
   const kpiActiveJobs = document.getElementById('kpiActiveJobs');
@@ -126,15 +131,36 @@
 
       // Daemon status badge
       const status = data.status || 'idle';
+      isDaemonPaused = !!data.is_paused;
       daemonStatusText.textContent = status.toUpperCase();
-      if (status === 'processing') {
+
+      if (isDaemonPaused) {
+        daemonStatusBadge.style.color = '#F59E0B';
+        daemonStatusBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+        daemonStatusBadge.style.background = 'rgba(245, 158, 11, 0.1)';
+        if (btnTogglePause) {
+          btnTogglePause.classList.add('is-paused');
+          pauseBtnText.textContent = 'Riprendi Coda';
+          pauseBtnIcon.innerHTML = '<polygon points="5 3 19 12 5 21 5 3"></polygon>';
+        }
+      } else if (status === 'processing') {
         daemonStatusBadge.style.color = '#06B6D4';
         daemonStatusBadge.style.borderColor = 'rgba(6, 182, 212, 0.4)';
         daemonStatusBadge.style.background = 'rgba(6, 182, 212, 0.1)';
+        if (btnTogglePause) {
+          btnTogglePause.classList.remove('is-paused');
+          pauseBtnText.textContent = 'Pausa Coda';
+          pauseBtnIcon.innerHTML = '<rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect>';
+        }
       } else {
         daemonStatusBadge.style.color = '#10B981';
         daemonStatusBadge.style.borderColor = 'rgba(16, 185, 129, 0.25)';
         daemonStatusBadge.style.background = 'rgba(16, 185, 129, 0.1)';
+        if (btnTogglePause) {
+          btnTogglePause.classList.remove('is-paused');
+          pauseBtnText.textContent = 'Pausa Coda';
+          pauseBtnIcon.innerHTML = '<rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect>';
+        }
       }
 
       // Metadata chips
@@ -196,27 +222,46 @@
 
       activeJobsContainer.innerHTML = jobs.map(job => {
         const durationSec = Math.floor((job.duration_ms || 0) / 1000);
-        const stageText = (job.stage || 'Transcodifica').toUpperCase();
+        const stageKey = job.stage || 'transcoding';
+        let stageName = 'Transcodifica';
+        if (stageKey === 'analyzing') stageName = 'Analisi & Regole';
+        else if (stageKey === 'transcoding') stageName = 'Decodifica & Ottimizzazione';
+        else if (stageKey === 'verifying_vmaf') stageName = 'Verifica Qualità VMAF';
+        else if (stageKey === 'checking_corruption') stageName = 'Verifica Integrità Stream';
+        else if (stageKey === 'finalizing') stageName = 'Finalizzazione & Sostituzione';
+
+        const stageDetail = job.stage_detail || `${stageName} in corso`;
         const prog = Math.min(100, Math.max(5, job.estimated_progress || 15));
 
         return `
-          <div class="active-job-card">
+          <div class="active-job-card" id="job-card-${escapeHtml(job.job_id)}">
             <div class="job-meta-row">
               <div class="job-file-info">
                 <span class="job-badge">${escapeHtml(job.worker_id || 'W1')}</span>
                 <span class="job-filename">${escapeHtml(job.file_name || job.source_path)}</span>
               </div>
-              <div class="meta-chip">
-                <span class="chip-label">DEST:</span>
-                <span class="chip-value">${escapeHtml(job.target_codec || 'H.265')} (${escapeHtml(job.preset || 'medium')})</span>
+              <div class="job-actions-wrap">
+                <div class="meta-chip">
+                  <span class="chip-label">DEST:</span>
+                  <span class="chip-value">${escapeHtml(job.target_codec || 'H.265')} (${escapeHtml(job.preset || 'medium')})</span>
+                </div>
+                <button class="btn btn-danger btn-sm btn-cancel-job" data-jobid="${escapeHtml(job.job_id)}" title="Interrompi questo job e passa al successivo">
+                  <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+                  </svg>
+                  <span>Stop / Salta</span>
+                </button>
               </div>
+            </div>
+            <div class="job-stage-desc stage-${escapeHtml(stageKey)}">
+              <span><strong>Fase:</strong> ${escapeHtml(stageName)} — ${escapeHtml(stageDetail)}</span>
             </div>
             <div class="job-progress-wrapper">
               <div class="progress-bar-bg">
                 <div class="progress-bar-fill" style="width: ${prog}%"></div>
               </div>
               <div class="progress-labels">
-                <span>Fase: <strong>${escapeHtml(stageText)}</strong></span>
+                <span>Progresso stimato: <strong>${prog}%</strong></span>
                 <span>Tempo trascorso: <strong>${formatDuration(durationSec)}</strong></span>
               </div>
             </div>
@@ -460,6 +505,59 @@
       appendLog('error', 'SCAN', 'Impossibile contattare il daemon per la scansione.');
     } finally {
       setTimeout(() => { btnTriggerScan.disabled = false; }, 3000);
+    }
+  });
+
+  if (btnTogglePause) {
+    btnTogglePause.addEventListener('click', async () => {
+      btnTogglePause.disabled = true;
+      const targetEndpoint = isDaemonPaused ? '/api/resume' : '/api/pause';
+      const actionName = isDaemonPaused ? 'Ripresa elaborazione' : 'Pausa elaborazione';
+      appendLog('info', 'QUEUE', `${actionName} richiesta...`);
+      try {
+        const res = await fetch(targetEndpoint, { method: 'POST' });
+        if (res.ok) {
+          const data = await res.json();
+          isDaemonPaused = !!data.is_paused;
+          fetchStatus();
+          appendLog(isDaemonPaused ? 'warning' : 'success', 'QUEUE', isDaemonPaused ? 'Daemon in pausa.' : 'Daemon riattivato.');
+        } else {
+          appendLog('error', 'QUEUE', `Errore durante il cambio di stato: ${res.statusText}`);
+        }
+      } catch (err) {
+        appendLog('error', 'QUEUE', `Impossibile contattare il daemon per ${targetEndpoint}`);
+      } finally {
+        setTimeout(() => { btnTogglePause.disabled = false; }, 500);
+      }
+    });
+  }
+
+  // Cancel / Skip active job listener delegation
+  activeJobsContainer.addEventListener('click', async (e) => {
+    const cancelBtn = e.target.closest('.btn-cancel-job');
+    if (!cancelBtn) return;
+    const jobID = cancelBtn.dataset.jobid;
+    if (!jobID) return;
+
+    if (!confirm('Vuoi davvero interrompere la transcodifica di questo video e passare al prossimo nella coda?')) {
+      return;
+    }
+
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = 'Arresto...';
+    appendLog('warning', 'JOB', `Richiesta interruzione immediata per ${jobID}...`);
+
+    try {
+      const res = await fetch(`/api/jobs/cancel?job_id=${encodeURIComponent(jobID)}`, { method: 'POST' });
+      if (res.ok) {
+        appendLog('success', 'JOB', `Job ${jobID} interrotto con successo. Il worker passerà al video successivo.`);
+        fetchActiveJobs();
+        fetchStatus();
+      } else {
+        appendLog('error', 'JOB', `Impossibile interrompere job ${jobID}: operazione rifiutata dal daemon.`);
+      }
+    } catch (err) {
+      appendLog('error', 'JOB', `Errore di connessione durante l'interruzione del job ${jobID}`);
     }
   });
 

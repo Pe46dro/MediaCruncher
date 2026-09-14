@@ -335,6 +335,61 @@ func (e *Engine) GetEntry(ctx context.Context, id int64) (*QueueEntry, error) {
 	return &entry, nil
 }
 
+// ListPendingEntries returns pending queue entries up to the limit.
+func (e *Engine) ListPendingEntries(ctx context.Context, limit int) ([]QueueEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := e.db.QueryContext(ctx,
+		`SELECT id, source_path, state, worker_id, priority, retry_count,
+			 created_at, scheduled_at, updated_at
+		 FROM queue_entries
+		 WHERE state = ?
+		 ORDER BY priority DESC, created_at ASC
+		 LIMIT ?`,
+		string(StatePending), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list pending entries: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []QueueEntry
+	for rows.Next() {
+		var entry QueueEntry
+		var scheduledAtStr, workerIDStr sql.NullString
+		var createdAtStr, updatedAtStr string
+
+		if err := rows.Scan(&entry.ID, &entry.SourcePath, &entry.State, &workerIDStr,
+			&entry.Priority, &entry.RetryCount, &createdAtStr, &scheduledAtStr, &updatedAtStr); err != nil {
+			return nil, err
+		}
+
+		if workerIDStr.Valid {
+			entry.WorkerID = workerIDStr.String
+		}
+		if t, parseErr := time.Parse(time.RFC3339, createdAtStr); parseErr == nil {
+			entry.CreatedAt = t
+		} else if t, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr); parseErr == nil {
+			entry.CreatedAt = t
+		}
+		if t, parseErr := time.Parse(time.RFC3339, updatedAtStr); parseErr == nil {
+			entry.UpdatedAt = t
+		} else if t, parseErr := time.Parse("2006-01-02 15:04:05", updatedAtStr); parseErr == nil {
+			entry.UpdatedAt = t
+		}
+		if scheduledAtStr.Valid {
+			t, err := time.Parse(time.RFC3339, scheduledAtStr.String)
+			if err == nil {
+				entry.ScheduledAt = &t
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
 // ErrQueueEmpty is returned when no pending entries are available for claiming.
 var ErrQueueEmpty = errors.New("no pending entries in queue")
 
