@@ -58,6 +58,9 @@ type TranscoderSettings struct {
 	FallbackToSoftware   bool    `json:"fallback_to_software"`
 	TargetCodec          string  `json:"target_codec,omitempty"`
 	Codec                string  `json:"codec,omitempty"`
+	VMAFSampling         bool    `json:"vmaf_sampling"`
+	VMAFSampleSegments   int     `json:"vmaf_sample_segments"`
+	VMAFSampleDuration   int     `json:"vmaf_sample_duration_sec"`
 }
 
 // WebSettings holds the HTTP and real-time dashboard server configuration.
@@ -168,6 +171,9 @@ func DefaultConfig() Config {
 			MaxEncodingDuration:  "2h",
 			FallbackToSoftware:   true,
 			TargetCodec:          "h.265",
+			VMAFSampling:         true,
+			VMAFSampleSegments:   3,
+			VMAFSampleDuration:   15,
 		},
 		Concurrency: ConcurrencySettings{
 			WorkerCount:     4,
@@ -300,6 +306,19 @@ func applyEnv(cfg *Config) {
 	if v := os.Getenv(envPrefix + "REPLACE_EXISTING_FILE"); v != "" {
 		cfg.Transcoder.ReplaceExistingFile = strings.EqualFold(v, "true") || v == "1"
 	}
+	if v := os.Getenv(envPrefix + "VMAF_SAMPLING"); v != "" {
+		cfg.Transcoder.VMAFSampling = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := os.Getenv(envPrefix + "VMAF_SAMPLE_SEGMENTS"); v != "" {
+		if n := parseInt(v); n > 0 {
+			cfg.Transcoder.VMAFSampleSegments = n
+		}
+	}
+	if v := os.Getenv(envPrefix + "VMAF_SAMPLE_DURATION_SEC"); v != "" {
+		if n := parseInt(v); n > 0 {
+			cfg.Transcoder.VMAFSampleDuration = n
+		}
+	}
 	if v := os.Getenv(envPrefix + "WEB_ENABLED"); v != "" {
 		cfg.Web.Enabled = strings.EqualFold(v, "true") || v == "1"
 	}
@@ -402,6 +421,9 @@ func (c *Config) ParsedTranscoder() ParsedTranscoder {
 		MaxEncodingDuration:  ParseDuration(c.Transcoder.MaxEncodingDuration),
 		FallbackToSoftware:   c.Transcoder.FallbackToSoftware,
 		TargetCodec:          codec,
+		VMAFSampling:         c.Transcoder.VMAFSampling,
+		VMAFSampleSegments:   c.Transcoder.VMAFSampleSegments,
+		VMAFSampleDuration:   c.Transcoder.VMAFSampleDuration,
 	}
 }
 
@@ -414,6 +436,9 @@ type ParsedTranscoder struct {
 	MaxEncodingDuration  time.Duration
 	FallbackToSoftware   bool
 	TargetCodec          string
+	VMAFSampling         bool
+	VMAFSampleSegments   int
+	VMAFSampleDuration   int
 }
 
 // ParsedNotification returns notification settings with parsed durations.

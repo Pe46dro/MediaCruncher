@@ -36,6 +36,9 @@ type Config struct {
 	BinaryPath           string
 	StagingDir           string
 	Logger               *observability.Logger
+	VMAFSampling         bool
+	VMAFSampleSegments   int
+	VMAFSampleDuration   int
 }
 
 // New creates a new transcoder engine.
@@ -88,7 +91,7 @@ func New(cfg Config) *Engine {
 
 	eng.negotiator = NewNegotiator(eng.hardwareProfile)
 	eng.encoder = NewEncoder(cfg.BinaryPath, cfg.StagingDir)
-	eng.vmafVerifier = NewVMAFVerifier(cfg.BinaryPath, cfg.VMAFThreshold, "libsvm")
+	eng.vmafVerifier = NewVMAFVerifierWithSampling(cfg.BinaryPath, cfg.VMAFThreshold, "libsvm", cfg.VMAFSampling, cfg.VMAFSampleSegments, cfg.VMAFSampleDuration)
 	eng.corruptionDetector = NewCorruptionDetector("ffprobe")
 	eng.stagingManager = NewStagingManager(cfg.StagingDir, 24*time.Hour)
 

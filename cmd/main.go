@@ -94,6 +94,9 @@ func main() {
 		MaxEncodingDuration:  maxEncDur,
 		StagingDir:           stagingDir,
 		Logger:               logger,
+		VMAFSampling:         cfg.Transcoder.VMAFSampling,
+		VMAFSampleSegments:   cfg.Transcoder.VMAFSampleSegments,
+		VMAFSampleDuration:   cfg.Transcoder.VMAFSampleDuration,
 	})
 	health.SetModuleStatus("transcoder", "healthy")
 
@@ -166,6 +169,7 @@ func main() {
 		observability.Field{Key: "max_quality_drop", Value: cfg.Transcoder.MaxQualityDrop},
 		observability.Field{Key: "discard_on_quality_loss", Value: cfg.Transcoder.DiscardOnQualityLoss},
 		observability.Field{Key: "replace_existing_file", Value: cfg.Transcoder.ReplaceExistingFile},
+		observability.Field{Key: "vmaf_sampling", Value: cfg.Transcoder.VMAFSampling},
 	).Info("mediacruncher daemon initialized")
 
 	processScan = func() {

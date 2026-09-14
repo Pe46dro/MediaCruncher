@@ -102,3 +102,41 @@ func TestRealVMAFCalculation(t *testing.T) {
 		t.Errorf("unexpected VMAF score range: %f", result.VMAFScore)
 	}
 }
+
+func TestSampledVMAFCalculation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mc_vmaf_sampled_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	orig := filepath.Join(tmpDir, "orig.mp4")
+	trans := filepath.Join(tmpDir, "trans.mp4")
+
+	// Generate a 4s test video
+	genCmd := exec.Command("ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "testsrc=duration=4:size=320x240:rate=25", "-c:v", "libx264", "-crf", "22", orig, "-y")
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg not available or failed to generate test video: %v (%s)", err, string(out))
+	}
+
+	transCmd := exec.Command("ffmpeg", "-hide_banner", "-i", orig, "-c:v", "libx264", "-crf", "28", trans, "-y")
+	if out, err := transCmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg failed to transcode test video: %v (%s)", err, string(out))
+	}
+
+	// Test with 2 segments of 1s each
+	verifier := NewVMAFVerifierWithSampling("ffmpeg", 80.0, "libsvm", true, 2, 1)
+	result := verifier.Verify(context.Background(), orig, trans)
+
+	if result.Error != "" {
+		t.Fatalf("sampled VMAF verification failed: %s", result.Error)
+	}
+
+	if result.VMAFScore <= 0 {
+		t.Errorf("expected positive VMAF score, got %f", result.VMAFScore)
+	}
+
+	if result.VMAFScore < 50.0 || result.VMAFScore > 100.0 {
+		t.Errorf("unexpected VMAF score range: %f", result.VMAFScore)
+	}
+}
