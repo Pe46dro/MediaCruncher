@@ -10,12 +10,14 @@
 **MediaCruncher** is a headless, autonomous media processing daemon written in pure Go (Go 1.25.5, Zero-CGO).  
 Its job is to:
 1. Scan local or network filesystem directories (`filesystem`).
-2. Analyze media files via `ffprobe` and match them against rule sets (`evaluation`).
-3. Queue tasks by priority, manage batching, rate-limiting, and retries (`concurrency`).
-4. Execute hardware- or software-accelerated video/audio transcoding with VMAF metric verification and corruption checks (`transcoder`).
-5. Persist processing state, queue entries, and historical decisions in SQLite (`persistence`).
-6. Dispatch events and status alerts to external webhooks and notification channels (`notification`).
-7. Expose Prometheus metrics, structured logs, and health status (`observability`).
+2. Deduplicate files via persistent SQLite hash registry to survive restarts without re-encoding (`persistence`).
+3. Analyze media files via `ffprobe` and match them against rule sets (`evaluation`).
+4. Queue tasks by priority, manage batching, rate-limiting, and retries (`concurrency`).
+5. Execute hardware- or software-accelerated video/audio transcoding with fast sampled VMAF metric verification and corruption checks (`transcoder`).
+6. Persist processing state, queue entries, and historical decisions in SQLite (`persistence`).
+7. Serve a real-time web dashboard with SSE event streaming and interactive metrics (`web`).
+8. Dispatch events and status alerts to external webhooks and notification channels (`notification`).
+9. Expose Prometheus metrics, structured logs, and health status (`observability`).
 
 ---
 
@@ -32,28 +34,35 @@ Its job is to:
 
 ```mermaid
 flowchart TD
-    FS[filesystem: Scan & Dedup] --> Eval[evaluation: ffprobe + Rules]
-    Eval --> DB[(persistence: SQLite)]
+    FS[filesystem: Scan & Dedup] --> DB[(persistence: SQLite)]
+    FS --> Eval[evaluation: ffprobe + Rules]
+    Eval --> DB
     Eval --> CC[concurrency: Priority TaskQueue]
     CC --> WP[concurrency: WorkerPools]
-    WP --> TC[transcoder: ffmpeg + VMAF + Staging]
+    WP --> TC[transcoder: ffmpeg + Sampled VMAF + Staging]
     TC --> DB
     TC --> Notif[notification: Adapters]
-    Obs[observability: Metrics & Health] -.-> CC & TC & FS & DB
+    TC --> Web[web: SSE Dashboard & API]
+    Obs[observability: Metrics & Health] -.-> CC & TC & FS & DB & Web
 ```
 
 ### Module Responsibilities
 
 1. **`cmd/main.go`**:
-   - Single application entrypoint.
+   - Single application entrypoint orchestrating all engines.
    - Discovers config via `$MC_CONFIG_DIR`, executable directory, or CWD.
-   - Initializes logger and Prometheus metrics server (`/metrics`).
-   - *(Note: orchestrator loop initialization into main daemon runtime is currently a work in progress).*
+   - Manages graceful shutdown via SIGINT/SIGTERM.
+   - Scans scopes on startup and periodically via timer or manual trigger from web dashboard.
+   - Implements persistent deduplication checking hashes before enqueuing to avoid reprocessing already completed/skipped items.
+   - Automatically falls back to original files if the transcoded file is larger than the original (`skipped_larger`).
+   - Serves the real-time SSE web server.
 
 2. **`internal/config`**:
    - Master configuration loaded from `mediacruncher.json` or `MC_*` environment variables.
    - `DefaultConfig()` is the single source of truth for fallback values.
-   - Parses human-readable durations and hardware acceleration settings.
+   - Parses human-readable durations (`2h`, `30s`) and hardware acceleration settings.
+   - Supports web dashboard settings (`web.enabled`, `web.port`, `web.addr`).
+   - Supports VMAF sampling parameters (`vmaf_sampling`, `vmaf_sample_segments`, `vmaf_sample_duration_sec`).
 
 3. **`internal/filesystem`**:
    - Traverses directories with `filepath.WalkDir`.
@@ -72,23 +81,40 @@ flowchart TD
 
 6. **`internal/transcoder`**:
    - Orchestrates `ffmpeg` CLI executions.
-   - Staging workflow: transcode to temp file (`.tmp`) -> compute VMAF score vs original -> verify integrity -> atomic rename over destination.
-   - Automatic fallback: Hardware acceleration (NVENC, QSV, VAAPI, VideoToolbox) -> Software (libx264/libx265/libsvtav1) upon failure.
+   - **Hardware Acceleration Discovery:** Actively probes hardware encoders (`ffmpeg -hide_banner -f lavfi -i testsrc -c:v <encoder> ...`) with dummy runs to verify real driver support (e.g., NVENC CUDA, Intel QSV, VAAPI, VideoToolbox) instead of purely checking static codec strings.
+   - **Sampled VMAF Verification (`vmaf.go`):**
+     - Fast multi-segment VMAF evaluation: for long videos, probes duration and evaluates $N$ segments (default 3 segments of 15s) using fast seek (`-ss` and `-t`), dropping computation time from 15-30 minutes to seconds.
+     - Fallback to real SSIM calculation (`ssim` filter) if `libvmaf` is not built into the FFmpeg binary.
+   - **Staging workflow:** transcode to temp directory -> compute VMAF score vs original -> verify integrity -> atomic rename / replacement.
+   - **Automatic fallback:** Hardware acceleration -> Software (`libx265`, `libx264`, `libsvtav1`) upon encoding failure or quality threshold failure.
 
 7. **`internal/persistence`**:
-   - Pure Go SQLite database (`modernc.org/sqlite`).
+   - Pure Go SQLite database (`modernc.org/sqlite`) with WAL journal mode.
    - Single-writer architecture: `MaxOpenConns = 1`, WAL journal mode, immediate transaction locking.
-   - `RecoverProcessing()` resets orphaned `processing` items to `pending` after crash/unclean shutdown.
+   - Manages queue states: `pending`, `processing`, `completed`, `failed`, `skipped_quality`, `skipped_larger`, `ignored`.
+   - `GetPendingDepth()` counts strictly `pending` items so queue depth resets to 0 when completed.
+   - `GetProcessedStats()` accurately computes space saved (`orig - output` for completed files) and aggregates skipped original preservation stats.
+   - `ListProcessedMedia()` aligns with stats, allowing the `skipped_quality` status filter to retrieve both `skipped_quality` and `skipped_larger` records.
+   - `RecoverProcessing()` resets orphaned `processing` items back to `pending` on restart.
 
-8. **`internal/notification`**:
+8. **`internal/web`**:
+   - Embedded single-page web application (`internal/web/static/` via `go:embed`).
+   - Server-Sent Events (SSE) broker (`/events`) streaming real-time queue states, active jobs, logs, and progress.
+   - REST API endpoints:
+     - `/api/status`: System hardware profile, runtime stats, disk savings, and queue depths.
+     - `/api/jobs`: Currently active transcoding workers and progress.
+     - `/api/media`: Paginated SQLite records with filter pills (`all`, `completed`, `skipped_quality`, `ignored`, `failed`).
+     - `/api/scan`: Trigger manual re-scan.
+
+9. **`internal/notification`**:
    - Multi-channel notification pipeline with dead-letter queue (`DLQ`).
    - Supported adapters under `adapters/`: Discord, Slack, Telegram, Gotify, SMTP (STARTTLS / SMTPS).
 
-9. **`internal/observability`**:
-   - Structured JSON/Console logger (`NewStdLogger`).
-   - Prometheus metrics registry (`NewRegistry`).
-   - Health checker (`NewHealthChecker`).
-   - Version injection via ldflags: `BuildVersion`, `BuildCommit`, `BuildTime`.
+10. **`internal/observability`**:
+    - Structured JSON/Console logger (`NewStdLogger`).
+    - Prometheus metrics registry (`NewRegistry`).
+    - Health checker (`NewHealthChecker`).
+    - Version injection via ldflags: `BuildVersion`, `BuildCommit`, `BuildTime`.
 
 ---
 
@@ -98,6 +124,7 @@ flowchart TD
 - **Constructors:** All internal modules follow `New(cfg Config) *Engine`.
 - **No Global Mutable State:** Observability build vars (`version.go`) are the only exported package-level variables.
 - **Error Wrapping:** Always wrap errors with contextual detail (`fmt.Errorf("context: %w", err)`).
+- **Tests with Race Detector:** Ensure all code passes `go test -v -race -count=1 ./...` and `go vet ./...`.
 
 ---
 
