@@ -60,13 +60,28 @@ func (e *Engine) Claim(ctx context.Context, workerID string) (*QueueEntry, error
 			string(StatePending),
 		)
 
-		var scheduledAtStr sql.NullString
-		if err := row.Scan(&entry.ID, &entry.SourcePath, &entry.State, &entry.WorkerID,
-			&entry.Priority, &entry.RetryCount, &entry.CreatedAt, &scheduledAtStr, &entry.UpdatedAt); err != nil {
+		var scheduledAtStr, workerIDStr sql.NullString
+		var createdAtStr, updatedAtStr string
+		if err := row.Scan(&entry.ID, &entry.SourcePath, &entry.State, &workerIDStr,
+			&entry.Priority, &entry.RetryCount, &createdAtStr, &scheduledAtStr, &updatedAtStr); err != nil {
 			if err == sql.ErrNoRows {
 				return ErrQueueEmpty
 			}
 			return fmt.Errorf("scan queue entry: %w", err)
+		}
+
+		if workerIDStr.Valid {
+			entry.WorkerID = workerIDStr.String
+		}
+		if t, parseErr := time.Parse(time.RFC3339, createdAtStr); parseErr == nil {
+			entry.CreatedAt = t
+		} else if t, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr); parseErr == nil {
+			entry.CreatedAt = t
+		}
+		if t, parseErr := time.Parse(time.RFC3339, updatedAtStr); parseErr == nil {
+			entry.UpdatedAt = t
+		} else if t, parseErr := time.Parse("2006-01-02 15:04:05", updatedAtStr); parseErr == nil {
+			entry.UpdatedAt = t
 		}
 
 		if scheduledAtStr.Valid {
@@ -90,12 +105,37 @@ func (e *Engine) Claim(ctx context.Context, workerID string) (*QueueEntry, error
 	return &entry, nil
 }
 
+// SetProcessing transitions a queue entry to processing state.
+func (e *Engine) SetProcessing(ctx context.Context, entryID int64, workerID string) error {
+	return e.InTransaction(ctx, func(tx *sql.Tx) error {
+		var prevState string
+		err := tx.QueryRowContext(ctx, `SELECT state FROM queue_entries WHERE id = ?`, entryID).Scan(&prevState)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE queue_entries SET state = ?, worker_id = ?, updated_at = datetime('now') WHERE id = ?`,
+			string(StateProcessing), workerID, entryID,
+		)
+		if err != nil {
+			return err
+		}
+		if prevState == string(StatePending) {
+			e.metrics.queueDepth.Dec()
+		}
+		return nil
+	})
+}
+
 // Complete transitions a queue entry to completed state with metadata linkage.
 func (e *Engine) Complete(ctx context.Context, entryID int64, metadataID int64) error {
 	return e.InTransaction(ctx, func(tx *sql.Tx) error {
+		var prevState string
+		_ = tx.QueryRowContext(ctx, `SELECT state FROM queue_entries WHERE id = ?`, entryID).Scan(&prevState)
+
 		result, err := tx.ExecContext(ctx,
-			`UPDATE queue_entries SET state = ?, updated_at = datetime('now') WHERE id = ? AND state = ?`,
-			string(StateCompleted), entryID, string(StateProcessing),
+			`UPDATE queue_entries SET state = ?, updated_at = datetime('now') WHERE id = ? AND state IN (?, ?)`,
+			string(StateCompleted), entryID, string(StateProcessing), string(StatePending),
 		)
 		if err != nil {
 			return fmt.Errorf("update queue entry state: %w", err)
@@ -105,7 +145,10 @@ func (e *Engine) Complete(ctx context.Context, entryID int64, metadataID int64) 
 			return err
 		}
 		if rows == 0 {
-			return fmt.Errorf("entry %d not in processing state", entryID)
+			return fmt.Errorf("entry %d not in processing or pending state", entryID)
+		}
+		if prevState == string(StatePending) {
+			e.metrics.queueDepth.Dec()
 		}
 		return nil
 	})
@@ -114,9 +157,12 @@ func (e *Engine) Complete(ctx context.Context, entryID int64, metadataID int64) 
 // Fail transitions a queue entry to failed state.
 func (e *Engine) Fail(ctx context.Context, entryID int64, reason string) error {
 	return e.InTransaction(ctx, func(tx *sql.Tx) error {
+		var prevState string
+		_ = tx.QueryRowContext(ctx, `SELECT state FROM queue_entries WHERE id = ?`, entryID).Scan(&prevState)
+
 		result, err := tx.ExecContext(ctx,
-			`UPDATE queue_entries SET state = ?, updated_at = datetime('now') WHERE id = ? AND state = ?`,
-			string(StateFailed), entryID, string(StateProcessing),
+			`UPDATE queue_entries SET state = ?, updated_at = datetime('now') WHERE id = ? AND state IN (?, ?)`,
+			string(StateFailed), entryID, string(StateProcessing), string(StatePending),
 		)
 		if err != nil {
 			return fmt.Errorf("update queue entry state: %w", err)
@@ -126,14 +172,17 @@ func (e *Engine) Fail(ctx context.Context, entryID int64, reason string) error {
 			return err
 		}
 		if rows == 0 {
-			return fmt.Errorf("entry %d not in processing state", entryID)
+			return fmt.Errorf("entry %d not in processing or pending state", entryID)
+		}
+		if prevState == string(StatePending) {
+			e.metrics.queueDepth.Dec()
 		}
 
 		// Append audit log
 		payload, marshalErr := json.Marshal(map[string]interface{}{
-			"event":  "job_failed",
+			"event":    "job_failed",
 			"entry_id": entryID,
-			"reason": reason,
+			"reason":   reason,
 		})
 		if marshalErr != nil {
 			return fmt.Errorf("marshal failure audit payload: %w", marshalErr)
@@ -145,6 +194,26 @@ func (e *Engine) Fail(ctx context.Context, entryID int64, reason string) error {
 		)
 		return err
 	})
+}
+
+// CleanupStaleQueue marks queue entries as completed if the file was already processed.
+func (e *Engine) CleanupStaleQueue(ctx context.Context) (int, error) {
+	count := 0
+	err := e.InTransaction(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`UPDATE queue_entries 
+			 SET state = 'completed', updated_at = datetime('now')
+			 WHERE state IN ('pending', 'processing') 
+			   AND source_path IN (SELECT source_path FROM processed_media WHERE status IN ('completed', 'skipped_quality', 'ignored'))`,
+		)
+		if err != nil {
+			return err
+		}
+		ra, _ := res.RowsAffected()
+		count = int(ra)
+		return nil
+	})
+	return count, err
 }
 
 // Requeue moves a failed entry back to pending with incremented retry count and backoff delay.
@@ -226,19 +295,34 @@ func (e *Engine) GetPendingDepth(ctx context.Context) (int64, error) {
 // GetEntry returns a queue entry by ID.
 func (e *Engine) GetEntry(ctx context.Context, id int64) (*QueueEntry, error) {
 	var entry QueueEntry
-	var scheduledAtStr sql.NullString
+	var scheduledAtStr, workerIDStr sql.NullString
+	var createdAtStr, updatedAtStr string
 
 	err := e.db.QueryRowContext(ctx,
 		`SELECT id, source_path, state, worker_id, priority, retry_count,
 			 created_at, scheduled_at, updated_at
 		 FROM queue_entries WHERE id = ?`, id,
-	).Scan(&entry.ID, &entry.SourcePath, &entry.State, &entry.WorkerID,
-		&entry.Priority, &entry.RetryCount, &entry.CreatedAt, &scheduledAtStr, &entry.UpdatedAt)
+	).Scan(&entry.ID, &entry.SourcePath, &entry.State, &workerIDStr,
+		&entry.Priority, &entry.RetryCount, &createdAtStr, &scheduledAtStr, &updatedAtStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, ErrEntryNotFound
 		}
 		return nil, fmt.Errorf("query entry: %w", err)
+	}
+
+	if workerIDStr.Valid {
+		entry.WorkerID = workerIDStr.String
+	}
+	if t, parseErr := time.Parse(time.RFC3339, createdAtStr); parseErr == nil {
+		entry.CreatedAt = t
+	} else if t, parseErr := time.Parse("2006-01-02 15:04:05", createdAtStr); parseErr == nil {
+		entry.CreatedAt = t
+	}
+	if t, parseErr := time.Parse(time.RFC3339, updatedAtStr); parseErr == nil {
+		entry.UpdatedAt = t
+	} else if t, parseErr := time.Parse("2006-01-02 15:04:05", updatedAtStr); parseErr == nil {
+		entry.UpdatedAt = t
 	}
 
 	if scheduledAtStr.Valid {

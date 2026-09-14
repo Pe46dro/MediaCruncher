@@ -75,10 +75,12 @@ func New(cfg Config) *Engine {
 					observability.Field{Key: "discovery_time", Value: disc.DiscoveryTime.String()},
 				).Info("hardware acceleration profile initialized")
 				for _, dev := range disc.Profile.Devices {
-					eng.logger.WithFields(
-						observability.Field{Key: "name", Value: dev.Name},
-						observability.Field{Key: "accel", Value: dev.Acceleration},
-					).Info("detected hardware encoder device")
+					if dev.Healthy && dev.Acceleration != "sw" {
+						eng.logger.WithFields(
+							observability.Field{Key: "name", Value: dev.Name},
+							observability.Field{Key: "accel", Value: dev.Acceleration},
+						).Info("detected hardware encoder device")
+					}
 				}
 			}
 		}
@@ -271,6 +273,11 @@ func (e *Engine) Transcode(ctx context.Context, job *TranscodeJob) *TranscodeOut
 
 	outcome.Status = TranscodeStatusCompleted
 	outcome.OutputPath = job.OutputPath
+	if encodingResult != nil && encodingResult.OutputSize > 0 {
+		outcome.OutputSize = encodingResult.OutputSize
+	} else if fi, statErr := os.Stat(job.OutputPath); statErr == nil {
+		outcome.OutputSize = fi.Size()
+	}
 	outcome.Duration = time.Since(start)
 
 	e.stagingManager.Cleanup(job.JobID)
@@ -324,6 +331,7 @@ type TranscodeOutcome struct {
 	JobID        string            `json:"job_id"`
 	SourcePath   string            `json:"source_path"`
 	OutputPath   string            `json:"output_path"`
+	OutputSize   int64             `json:"output_size,omitempty"`
 	Status       TranscodeStatus   `json:"status"`
 	Error        string            `json:"error,omitempty"`
 	Encoding     *EncodingResult   `json:"encoding"`

@@ -273,6 +273,8 @@
             }
           } else if (item.status === 'skipped_quality') {
             badgeHtml = '<span class="badge badge-skipped-quality">Qualità Preservata</span>';
+          } else if (item.status === 'skipped_larger') {
+            badgeHtml = '<span class="badge badge-skipped-quality">Dimensione Ottimale</span>';
           } else if (item.status === 'ignored') {
             badgeHtml = '<span class="badge badge-ignored">Conforme/Ignorato</span>';
           } else {
@@ -286,6 +288,8 @@
           let note = '-';
           if (item.status === 'skipped_quality') {
             note = '<span style="color: #FBBF24;">Originale mantenuto (perdita > soglia)</span>';
+          } else if (item.status === 'skipped_larger') {
+            note = '<span style="color: #FBBF24;">Originale mantenuto (output risulterebbe più grande)</span>';
           } else if (item.replaced_original) {
             note = '<span style="color: #C084FC; font-weight: 600;">Originale sostituito sul posto</span>';
           } else if (item.output_path) {
@@ -293,6 +297,12 @@
             note = `<span style="color: #34D399;">${escapeHtml(outName)}</span>`;
           } else if (item.error_message) {
             note = `<span style="color: #F87171;">${escapeHtml(item.error_message)}</span>`;
+          }
+
+          let sizeDisplay = formatBytes(item.file_size);
+          if (item.status === 'completed' && item.output_size && item.output_size > 0 && item.output_size < item.file_size) {
+            const saved = item.file_size - item.output_size;
+            sizeDisplay = `<div style="font-size: 13px;">${formatBytes(item.file_size)} → ${formatBytes(item.output_size)}</div><div style="color: #34D399; font-size: 11px; font-weight: 600;">-${formatBytes(saved)} (${((saved / item.file_size) * 100).toFixed(1)}%)</div>`;
           }
 
           return `
@@ -303,7 +313,7 @@
                   <span class="file-hash-tag" title="${escapeHtml(item.file_hash)}">HASH: ${escapeHtml(hashShort)}</span>
                 </div>
               </td>
-              <td>${formatBytes(item.file_size)}</td>
+              <td>${sizeDisplay}</td>
               <td>${badgeHtml}</td>
               <td><strong>${vmafDisplay}</strong></td>
               <td>${note}</td>

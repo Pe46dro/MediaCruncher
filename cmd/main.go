@@ -58,6 +58,11 @@ func main() {
 	} else if recovered > 0 {
 		logger.WithFields(observability.Field{Key: "recovered", Value: recovered}).Info("recovered pending jobs")
 	}
+	if cleaned, err := db.CleanupStaleQueue(ctx); err != nil {
+		logger.WithFields(observability.Field{Key: "error", Value: err}).Warn("failed to clean stale queue jobs")
+	} else if cleaned > 0 {
+		logger.WithFields(observability.Field{Key: "cleaned", Value: cleaned}).Info("cleaned processed jobs from queue")
+	}
 
 	// 2. Initialize Evaluation Engine
 	probeTimeout, _ := time.ParseDuration(cfg.Evaluation.ProbeTimeout)
@@ -116,7 +121,14 @@ func main() {
 	stateTracker := web.NewStateTracker()
 	hwAccelName := "Software (CPU)"
 	if cfg.Transcoder.HardwareAcceleration {
-		hwAccelName = "Hardware Acceleration"
+		if prof := transEngine.GetHardwareProfile(); prof != nil {
+			for _, dev := range prof.Devices {
+				if dev.Healthy && dev.Acceleration != "sw" {
+					hwAccelName = dev.Name
+					break
+				}
+			}
+		}
 	}
 	stateTracker.SetSystemInfo(hwAccelName, cfg.Transcoder.TargetCodec, cfg.Transcoder.VMAFThreshold, cfg.Transcoder.MaxQualityDrop)
 
@@ -199,7 +211,7 @@ func main() {
 				processedRec, checkErr := db.GetProcessedMediaByHash(ctx, file.PartialHash)
 				if checkErr == nil && processedRec != nil {
 					// File already processed in a previous run (survives docker compose restart!)
-					if processedRec.Status == "completed" || processedRec.Status == "skipped_quality" || processedRec.Status == "ignored" {
+					if processedRec.Status == "completed" || processedRec.Status == "skipped_quality" || processedRec.Status == "skipped_larger" || processedRec.Status == "ignored" {
 						logger.WithFields(
 							observability.Field{Key: "path", Value: file.AbsolutePath},
 							observability.Field{Key: "hash", Value: file.PartialHash},
@@ -226,11 +238,17 @@ func main() {
 			if err != nil {
 				logger.WithFields(observability.Field{Key: "error", Value: err}).Warn("failed to enqueue file")
 			}
+			if queueID > 0 {
+				_ = db.SetProcessing(ctx, queueID, "worker-1")
+			}
 
 			decision, err := evalEngine.AnalyzeFile(ctx, file.AbsolutePath, queueID)
 			if err != nil {
 				logger.WithFields(observability.Field{Key: "error", Value: err}).Error("evaluation failed")
 				broker.Broadcast("evaluation_failed", "error", fmt.Sprintf("Valutazione fallita per %s: %v", filepath.Base(file.AbsolutePath), err), nil)
+				if queueID > 0 {
+					_ = db.Fail(ctx, queueID, err.Error())
+				}
 				continue
 			}
 
@@ -295,12 +313,52 @@ func main() {
 				stateTracker.RemoveActiveJob(jobID)
 
 				if outcome.Status == transcoder.TranscodeStatusCompleted {
+					// Check if transcoded output is larger than original
+					if outcome.OutputSize >= file.Size {
+						logger.WithFields(
+							observability.Field{Key: "source", Value: file.AbsolutePath},
+							observability.Field{Key: "original_size", Value: file.Size},
+							observability.Field{Key: "transcoded_size", Value: outcome.OutputSize},
+						).Warn("transcoded file is larger than original: preserving original, output deleted to avoid wasting disk space")
+
+						if queueID > 0 {
+							_ = db.Complete(ctx, queueID, 0)
+						}
+						if outcome.OutputPath != "" {
+							_ = os.Remove(outcome.OutputPath)
+						}
+
+						var vmafScore float64
+						if outcome.Verification != nil {
+							vmafScore = outcome.Verification.VMAFScore
+						}
+
+						_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
+							SourcePath:   file.AbsolutePath,
+							FileHash:     file.PartialHash,
+							FileSize:     file.Size,
+							OutputSize:   file.Size,
+							Status:       "skipped_larger",
+							VMAFScore:    vmafScore,
+							DurationMs:   outcome.Duration.Milliseconds(),
+							ErrorMessage: fmt.Sprintf("output (%s) larger than original (%s)", formatBytes(outcome.OutputSize), formatBytes(file.Size)),
+						})
+
+						broker.Broadcast("file_skipped_larger", "warning", fmt.Sprintf("File originale preservato per %s: output più grande dell'originale (%s vs %s)", filepath.Base(file.AbsolutePath), formatBytes(outcome.OutputSize), formatBytes(file.Size)), map[string]interface{}{
+							"source":          file.AbsolutePath,
+							"original_size":   file.Size,
+							"transcoded_size": outcome.OutputSize,
+						})
+						continue
+					}
+
 					var vmafScore float64
 					if outcome.Verification != nil {
 						vmafScore = outcome.Verification.VMAFScore
 					}
 
 					finalOutputPath := outcome.OutputPath
+					finalOutputSize := outcome.OutputSize
 					replacedOriginal := false
 					if cfg.Transcoder.ReplaceExistingFile && outcome.OutputPath != "" && outcome.OutputPath != file.AbsolutePath {
 						_ = os.Remove(file.AbsolutePath)
@@ -329,48 +387,47 @@ func main() {
 						}
 					}
 
+					if finalOutputSize <= 0 {
+						if fi, statErr := os.Stat(finalOutputPath); statErr == nil {
+							finalOutputSize = fi.Size()
+						}
+					}
+
 					logger.WithFields(
 						observability.Field{Key: "output", Value: finalOutputPath},
 						observability.Field{Key: "duration", Value: outcome.Duration.String()},
 						observability.Field{Key: "vmaf_score", Value: vmafScore},
 						observability.Field{Key: "replaced_original", Value: replacedOriginal},
+						observability.Field{Key: "original_size", Value: file.Size},
+						observability.Field{Key: "output_size", Value: finalOutputSize},
 					).Info("transcoding completed successfully")
 
 					if queueID > 0 {
 						_ = db.Complete(ctx, queueID, 0)
 					}
 
-					// Persist completed record in SQLite with hash!
+					// Persist single completed record in SQLite with hash and output_size
+					activeHash := file.PartialHash
+					origHash := ""
+					if replacedOriginal {
+						if newHash, hashErr := filesystem.ComputePartialHash(file.AbsolutePath); hashErr == nil && newHash != "" {
+							origHash = file.PartialHash
+							activeHash = newHash
+						}
+					}
+
 					_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
 						SourcePath:       file.AbsolutePath,
-						FileHash:         file.PartialHash,
+						FileHash:         activeHash,
+						OriginalHash:     origHash,
 						FileSize:         file.Size,
+						OutputSize:       finalOutputSize,
 						Status:           "completed",
 						OutputPath:       finalOutputPath,
 						VMAFScore:        vmafScore,
 						DurationMs:       outcome.Duration.Milliseconds(),
 						ReplacedOriginal: replacedOriginal,
 					})
-
-					// If original file was replaced, register the new partial hash so subsequent scans recognize it!
-					if replacedOriginal {
-						if newHash, hashErr := filesystem.ComputePartialHash(file.AbsolutePath); hashErr == nil && newHash != "" && newHash != file.PartialHash {
-							var newSize int64
-							if fi, statErr := os.Stat(file.AbsolutePath); statErr == nil {
-								newSize = fi.Size()
-							}
-							_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
-								SourcePath:       file.AbsolutePath,
-								FileHash:         newHash,
-								FileSize:         newSize,
-								Status:           "completed",
-								OutputPath:       finalOutputPath,
-								VMAFScore:        vmafScore,
-								DurationMs:       outcome.Duration.Milliseconds(),
-								ReplacedOriginal: true,
-							})
-						}
-					}
 
 					msg := fmt.Sprintf("Transcodifica completata con successo: %s (VMAF: %.2f)", filepath.Base(file.AbsolutePath), vmafScore)
 					if replacedOriginal {
@@ -410,6 +467,7 @@ func main() {
 						SourcePath:   file.AbsolutePath,
 						FileHash:     file.PartialHash,
 						FileSize:     file.Size,
+						OutputSize:   file.Size,
 						Status:       "skipped_quality",
 						VMAFScore:    vmafScore,
 						DurationMs:   outcome.Duration.Milliseconds(),
@@ -438,11 +496,15 @@ func main() {
 				}
 			} else {
 				// Decision is not transcode (e.g. copy, ignore)
+				if queueID > 0 {
+					_ = db.Complete(ctx, queueID, 0)
+				}
 				// Record as ignored so on subsequent runs we don't re-probe
 				_ = db.RecordProcessedMedia(ctx, &persistence.ProcessedMediaRecord{
 					SourcePath:   file.AbsolutePath,
 					FileHash:     file.PartialHash,
 					FileSize:     file.Size,
+					OutputSize:   file.Size,
 					Status:       "ignored",
 					ErrorMessage: fmt.Sprintf("rule decision: %s", decision.Action),
 				})
@@ -531,4 +593,18 @@ func copyFile(src, dst string) error {
 	}
 	return out.Sync()
 }
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
 

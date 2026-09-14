@@ -1,7 +1,9 @@
 package transcoder
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -60,5 +62,43 @@ func TestQualityDropThresholdAndDiscard(t *testing.T) {
 	// Test validateSource
 	if !engine.validateSource(job) {
 		t.Error("expected validateSource to return true for existing file")
+	}
+}
+
+func TestRealVMAFCalculation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "mc_vmaf_test_*")
+	if err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	orig := filepath.Join(tmpDir, "orig.mp4")
+	trans := filepath.Join(tmpDir, "trans.mp4")
+
+	// Generate a 0.5s test video
+	genCmd := exec.Command("ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=320x240:rate=25", "-c:v", "libx264", "-crf", "20", orig, "-y")
+	if out, err := genCmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg not available or failed to generate test video: %v (%s)", err, string(out))
+	}
+
+	// Transcode with higher crf
+	transCmd := exec.Command("ffmpeg", "-hide_banner", "-i", orig, "-c:v", "libx264", "-crf", "28", trans, "-y")
+	if out, err := transCmd.CombinedOutput(); err != nil {
+		t.Skipf("ffmpeg failed to transcode test video: %v (%s)", err, string(out))
+	}
+
+	verifier := NewVMAFVerifier("ffmpeg", 80.0, "libsvm")
+	result := verifier.Verify(context.Background(), orig, trans)
+
+	if result.Error != "" {
+		t.Fatalf("VMAF verification failed: %s", result.Error)
+	}
+
+	if result.VMAFScore <= 0 {
+		t.Errorf("expected positive VMAF score, got %f", result.VMAFScore)
+	}
+
+	if result.VMAFScore < 50.0 || result.VMAFScore > 100.0 {
+		t.Errorf("unexpected VMAF score range: %f", result.VMAFScore)
 	}
 }

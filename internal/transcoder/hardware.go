@@ -63,17 +63,35 @@ func Discovery(ctx context.Context, binaryPath string, preferredDevice int) *Dis
 		return result
 	}
 
+	var healthyDevices []GPUDevice
 	for i := range devices {
 		if devices[i].Acceleration != "sw" {
-			devices[i].Healthy = HealthCheck(ctx, devices[i].Acceleration, devices[i].ID)
+			devices[i].Healthy = HealthCheckWithBinary(ctx, binaryPath, devices[i].Acceleration, devices[i].ID)
+		}
+		if devices[i].Healthy && devices[i].Acceleration != "sw" {
+			healthyDevices = append(healthyDevices, devices[i])
 		}
 	}
 
-	result.DevicesFound = len(devices)
-	result.Profile.Devices = devices
+	if len(healthyDevices) == 0 {
+		healthyDevices = append(healthyDevices, GPUDevice{
+			ID:              0,
+			Name:            "Software",
+			Vendor:          "Generic",
+			Acceleration:    "sw",
+			SupportedCodecs: []string{"h.264", "h.265", "av1"},
+			MemoryMB:        0,
+			Healthy:         true,
+		})
+		result.DevicesFound = 0
+	} else {
+		result.DevicesFound = len(healthyDevices)
+	}
+
+	result.Profile.Devices = healthyDevices
 
 	for _, codec := range getDefaultCodecs() {
-		for _, device := range devices {
+		for _, device := range healthyDevices {
 			if device.Healthy && !device.ThermalThrottled {
 				for _, sc := range device.SupportedCodecs {
 					if sc == codec {
@@ -231,10 +249,18 @@ func appendUnique(slice []string, items ...string) []string {
 	return slice
 }
 
-// HealthCheck verifies the health of a GPU device.
+// HealthCheck verifies the health of a GPU device using default binary.
 func HealthCheck(ctx context.Context, accel string, deviceID int) bool {
+	return HealthCheckWithBinary(ctx, "ffmpeg", accel, deviceID)
+}
+
+// HealthCheckWithBinary verifies the health of a GPU device using the specified binary path.
+func HealthCheckWithBinary(ctx context.Context, binaryPath string, accel string, deviceID int) bool {
 	if accel == "sw" || accel == "" {
 		return true
+	}
+	if binaryPath == "" {
+		binaryPath = "ffmpeg"
 	}
 
 	testEncoder := ""
@@ -251,14 +277,16 @@ func HealthCheck(ctx context.Context, accel string, deviceID int) bool {
 		testEncoder = "h264_videotoolbox"
 	}
 
+	// 1. Try a test encode with 256x256 (supported across modern hardware encoders)
 	if testEncoder != "" {
-		cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04", "-c:v", testEncoder, "-f", "null", "-")
+		cmd := exec.CommandContext(ctx, binaryPath, "-hide_banner", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.04", "-c:v", testEncoder, "-f", "null", "-")
 		if err := cmd.Run(); err == nil {
 			return true
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-init_hw_device", fmt.Sprintf("%s:%d", accel, deviceID), "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.04", "-f", "null", "-")
+	// 2. Fallback: try initializing hardware device
+	cmd := exec.CommandContext(ctx, binaryPath, "-hide_banner", "-init_hw_device", fmt.Sprintf("%s:%d", accel, deviceID), "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.04", "-f", "null", "-")
 	err := cmd.Run()
 	return err == nil
 }

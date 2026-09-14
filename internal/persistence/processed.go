@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -13,8 +14,10 @@ type ProcessedMediaRecord struct {
 	ID               int64     `json:"id"`
 	SourcePath       string    `json:"source_path"`
 	FileHash         string    `json:"file_hash"`
+	OriginalHash     string    `json:"original_hash,omitempty"`
 	FileSize         int64     `json:"file_size"`
-	Status           string    `json:"status"` // "completed", "skipped_quality", "ignored", "failed"
+	OutputSize       int64     `json:"output_size,omitempty"`
+	Status           string    `json:"status"` // "completed", "skipped_quality", "skipped_larger", "ignored", "failed"
 	OutputPath       string    `json:"output_path,omitempty"`
 	VMAFScore        float64   `json:"vmaf_score,omitempty"`
 	DurationMs       int64     `json:"duration_ms,omitempty"`
@@ -38,7 +41,7 @@ type PersistenceStats struct {
 	AvgVMAF              float64 `json:"avg_vmaf"`
 }
 
-// GetProcessedMediaByHash queries the database for a media record with the given file hash.
+// GetProcessedMediaByHash queries the database for a media record with the given file hash or original hash.
 // If found, it returns the record; if not found, it returns (nil, nil).
 func (e *Engine) GetProcessedMediaByHash(ctx context.Context, hash string) (*ProcessedMediaRecord, error) {
 	if hash == "" {
@@ -46,21 +49,21 @@ func (e *Engine) GetProcessedMediaByHash(ctx context.Context, hash string) (*Pro
 	}
 
 	row := e.db.QueryRowContext(ctx,
-		`SELECT id, source_path, file_hash, file_size, status,
+		`SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
 		        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 		        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
 		        COALESCE(replaced_original, 0), created_at, updated_at
 		 FROM processed_media
-		 WHERE file_hash = ?
+		 WHERE file_hash = ? OR original_hash = ?
 		 LIMIT 1`,
-		hash,
+		hash, hash,
 	)
 
 	var rec ProcessedMediaRecord
 	var createdAtStr, updatedAtStr string
 	var repOrig int
 	err := row.Scan(
-		&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.FileSize, &rec.Status,
+		&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.OriginalHash, &rec.FileSize, &rec.OutputSize, &rec.Status,
 		&rec.OutputPath, &rec.VMAFScore, &rec.DurationMs, &rec.ErrorMessage,
 		&repOrig, &createdAtStr, &updatedAtStr,
 	)
@@ -100,12 +103,14 @@ func (e *Engine) RecordProcessedMedia(ctx context.Context, rec *ProcessedMediaRe
 	return e.InTransaction(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO processed_media (
-				source_path, file_hash, file_size, status, output_path,
+				source_path, file_hash, original_hash, file_size, output_size, status, output_path,
 				vmaf_score, duration_ms, error_message, replaced_original, created_at, updated_at
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
 			ON CONFLICT(file_hash) DO UPDATE SET
 				source_path = excluded.source_path,
+				original_hash = CASE WHEN excluded.original_hash != '' THEN excluded.original_hash ELSE processed_media.original_hash END,
 				file_size = excluded.file_size,
+				output_size = excluded.output_size,
 				status = excluded.status,
 				output_path = excluded.output_path,
 				vmaf_score = excluded.vmaf_score,
@@ -113,7 +118,7 @@ func (e *Engine) RecordProcessedMedia(ctx context.Context, rec *ProcessedMediaRe
 				error_message = excluded.error_message,
 				replaced_original = excluded.replaced_original,
 				updated_at = datetime('now')`,
-			rec.SourcePath, rec.FileHash, rec.FileSize, rec.Status,
+			rec.SourcePath, rec.FileHash, rec.OriginalHash, rec.FileSize, rec.OutputSize, rec.Status,
 			rec.OutputPath, rec.VMAFScore, rec.DurationMs, rec.ErrorMessage,
 			repOrigInt,
 		)
@@ -141,7 +146,7 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 	if statusFilter != "" && statusFilter != "all" {
 		countQuery = `SELECT COUNT(*) FROM processed_media WHERE status = ?`
 		countArgs = append(countArgs, statusFilter)
-		query = `SELECT id, source_path, file_hash, file_size, status,
+		query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
 				        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 				        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
 				        COALESCE(replaced_original, 0), created_at, updated_at
@@ -151,7 +156,7 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 		args = append(args, statusFilter, limit, offset)
 	} else {
 		countQuery = `SELECT COUNT(*) FROM processed_media`
-		query = `SELECT id, source_path, file_hash, file_size, status,
+		query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
 				        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
 				        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
 				        COALESCE(replaced_original, 0), created_at, updated_at
@@ -178,7 +183,7 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 		var createdAtStr, updatedAtStr string
 		var repOrig int
 		if err := rows.Scan(
-			&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.FileSize, &rec.Status,
+			&rec.ID, &rec.SourcePath, &rec.FileHash, &rec.OriginalHash, &rec.FileSize, &rec.OutputSize, &rec.Status,
 			&rec.OutputPath, &rec.VMAFScore, &rec.DurationMs, &rec.ErrorMessage,
 			&repOrig, &createdAtStr, &updatedAtStr,
 		); err != nil {
@@ -236,8 +241,8 @@ func (e *Engine) GetProcessedStats(ctx context.Context) (*PersistenceStats, erro
 				vmafSum += avgVMAF * float64(count)
 				vmafCount += count
 			}
-		case "skipped_quality":
-			stats.SkippedQuality = count
+		case "skipped_quality", "skipped_larger":
+			stats.SkippedQuality += count
 		case "ignored":
 			stats.Ignored = count
 		case "failed":
@@ -249,24 +254,38 @@ func (e *Engine) GetProcessedStats(ctx context.Context) (*PersistenceStats, erro
 		stats.AvgVMAF = vmafSum / float64(vmafCount)
 	}
 
-	// Calculate transcoded output bytes for completed files
+	// Calculate transcoded output bytes and bytes saved for completed files
 	compRows, err := e.db.QueryContext(ctx,
-		`SELECT output_path FROM processed_media WHERE status = 'completed' AND output_path != ''`,
+		`SELECT file_size, output_size, COALESCE(output_path, '') FROM processed_media WHERE status = 'completed'`,
 	)
 	if err == nil {
 		defer compRows.Close()
 		for compRows.Next() {
+			var origSize, outSize int64
 			var outPath string
-			if err := compRows.Scan(&outPath); err == nil && outPath != "" {
-				if fi, statErr := os.Stat(outPath); statErr == nil {
-					stats.TotalTranscodedBytes += fi.Size()
+			if err := compRows.Scan(&origSize, &outSize, &outPath); err == nil {
+				// If output_size was not saved directly in DB (legacy records), fallback to checking file
+				if outSize <= 0 && outPath != "" {
+					if fi, statErr := os.Stat(outPath); statErr == nil {
+						outSize = fi.Size()
+					} else if strings.HasPrefix(outPath, "/app/") {
+						rel := strings.TrimPrefix(outPath, "/app/")
+						if fi, statErr := os.Stat(rel); statErr == nil {
+							outSize = fi.Size()
+						}
+					}
+				}
+				if outSize > 0 {
+					stats.TotalTranscodedBytes += outSize
+					if origSize > outSize {
+						stats.BytesSaved += (origSize - outSize)
+					}
 				}
 			}
 		}
 	}
 
-	if stats.TotalOriginalBytes > 0 && stats.TotalTranscodedBytes > 0 && stats.TotalOriginalBytes > stats.TotalTranscodedBytes {
-		stats.BytesSaved = stats.TotalOriginalBytes - stats.TotalTranscodedBytes
+	if stats.TotalOriginalBytes > 0 && stats.BytesSaved > 0 {
 		stats.SavingsPercentage = (float64(stats.BytesSaved) / float64(stats.TotalOriginalBytes)) * 100.0
 	}
 

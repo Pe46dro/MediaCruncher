@@ -236,7 +236,7 @@ func (e *Encoder) buildCommand(ctx context.Context, job *TranscodeJob, outputPat
 	if preset != nil && preset.QualityLevel > 0 {
 		switch codec.Acceleration {
 		case "cuda":
-			args = append(args, "-cq", fmt.Sprintf("%d", preset.QualityLevel))
+			args = append(args, "-rc:v", "vbr", "-cq", fmt.Sprintf("%d", preset.QualityLevel), "-b:v", "0")
 		case "qsv":
 			args = append(args, "-global_quality", fmt.Sprintf("%d", preset.QualityLevel))
 		case "videotoolbox":

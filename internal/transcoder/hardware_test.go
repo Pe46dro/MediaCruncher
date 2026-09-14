@@ -62,6 +62,20 @@ func TestParseHwAccelsEmptyFallback(t *testing.T) {
 	}
 }
 
+func TestDiscoveryFilterHealthy(t *testing.T) {
+	ctx := context.Background()
+	disc := Discovery(ctx, "ffmpeg", 0)
+	if disc == nil || disc.Profile == nil {
+		t.Fatal("expected discovery profile, got nil")
+	}
+
+	for _, dev := range disc.Profile.Devices {
+		if !dev.Healthy {
+			t.Errorf("found unhealthy device in profile: %s (%s)", dev.Name, dev.Acceleration)
+		}
+	}
+}
+
 func TestNegotiateH265WithCuda(t *testing.T) {
 	profile := &HardwareProfile{
 		Codecs: CodecMap{
