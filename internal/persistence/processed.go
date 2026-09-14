@@ -144,16 +144,28 @@ func (e *Engine) ListProcessedMedia(ctx context.Context, limit, offset int, stat
 	var countArgs []interface{}
 
 	if statusFilter != "" && statusFilter != "all" {
-		countQuery = `SELECT COUNT(*) FROM processed_media WHERE status = ?`
-		countArgs = append(countArgs, statusFilter)
-		query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
-				        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
-				        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
-				        COALESCE(replaced_original, 0), created_at, updated_at
-				 FROM processed_media
-				 WHERE status = ?
-				 ORDER BY updated_at DESC LIMIT ? OFFSET ?`
-		args = append(args, statusFilter, limit, offset)
+		if statusFilter == "skipped_quality" {
+			countQuery = `SELECT COUNT(*) FROM processed_media WHERE status IN ('skipped_quality', 'skipped_larger')`
+			query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
+					        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
+					        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
+					        COALESCE(replaced_original, 0), created_at, updated_at
+					 FROM processed_media
+					 WHERE status IN ('skipped_quality', 'skipped_larger')
+					 ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+			args = append(args, limit, offset)
+		} else {
+			countQuery = `SELECT COUNT(*) FROM processed_media WHERE status = ?`
+			countArgs = append(countArgs, statusFilter)
+			query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,
+					        COALESCE(output_path, ''), COALESCE(vmaf_score, 0),
+					        COALESCE(duration_ms, 0), COALESCE(error_message, ''),
+					        COALESCE(replaced_original, 0), created_at, updated_at
+					 FROM processed_media
+					 WHERE status = ?
+					 ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+			args = append(args, statusFilter, limit, offset)
+		}
 	} else {
 		countQuery = `SELECT COUNT(*) FROM processed_media`
 		query = `SELECT id, source_path, file_hash, COALESCE(original_hash, ''), file_size, COALESCE(output_size, 0), status,

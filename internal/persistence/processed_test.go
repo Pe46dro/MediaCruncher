@@ -108,11 +108,38 @@ func TestProcessedMediaPersistence(t *testing.T) {
 		t.Fatalf("expected 1 record, got total %d, len %d", total, len(list))
 	}
 
+	// 6. Test skipped_quality filter matches skipped_quality
+	qList, qTotal, err := engine.ListProcessedMedia(ctx, 10, 0, "skipped_quality")
+	if err != nil {
+		t.Fatalf("list skipped_quality error: %v", err)
+	}
+	if qTotal != 1 || len(qList) != 1 {
+		t.Fatalf("expected 1 skipped_quality record, got total %d, len %d", qTotal, len(qList))
+	}
+
+	// 7. Add skipped_larger record and check both are returned by skipped_quality filter
+	rec2 := &ProcessedMediaRecord{
+		SourcePath: "/media/video2.mp4",
+		FileHash:   "test-hash-video-2",
+		FileSize:   2000000,
+		Status:     "skipped_larger",
+	}
+	if err := engine.RecordProcessedMedia(ctx, rec2); err != nil {
+		t.Fatalf("record rec2 error: %v", err)
+	}
+	qList, qTotal, err = engine.ListProcessedMedia(ctx, 10, 0, "skipped_quality")
+	if err != nil {
+		t.Fatalf("list skipped_quality with skipped_larger error: %v", err)
+	}
+	if qTotal != 2 || len(qList) != 2 {
+		t.Fatalf("expected 2 records for skipped_quality filter, got total %d, len %d", qTotal, len(qList))
+	}
+
 	stats, err := engine.GetProcessedStats(ctx)
 	if err != nil {
 		t.Fatalf("stats error: %v", err)
 	}
-	if stats.TotalFiles != 1 || stats.SkippedQuality != 1 {
+	if stats.TotalFiles != 2 || stats.SkippedQuality != 2 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 }
