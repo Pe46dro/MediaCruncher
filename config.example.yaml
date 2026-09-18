@@ -1,0 +1,142 @@
+# MediaCruncher Production Configuration Example
+
+database:
+  path: "mediacruncher.db"
+  busy_timeout: 5000 # milliseconds to wait on locked SQLite transactions
+
+filesystem:
+  ingestion_capacity: 5000
+  scopes:
+    - path: "/media/library"
+      extensions:
+        - ".mp4"
+        - ".mkv"
+        - ".mov"
+        - ".avi"
+        - ".m4v"
+      exclusions:
+        - "*.part"
+        - "*.tmp"
+        - "*sample*"
+        - "*extras*"
+      max_depth: 10
+      follow_symlinks: false
+
+evaluation:
+  default_action: "transcode" # transcode, copy, skip, review
+  default_preset: "balanced-hevc"
+
+  audio_preservation:
+    retain_surround_tracks: true # preserve 5.1/7.1 channels
+    copy_lossless_audio: true    # preserve TrueHD, DTS-HD MA, FLAC
+    preferred_languages:
+      - "eng"
+      - "ita"
+      - "und"
+
+  codec_aliases:
+    h264: "h264"
+    avc1: "h264"
+    hevc: "hevc"
+    h265: "hevc"
+    hev1: "hevc"
+    av01: "av1"
+    av1:  "av1"
+
+  rules:
+    - name: "Skip Modern AV1 and HEVC"
+      priority: 100
+      conditions:
+        codec: "hevc,av1"
+      action: "skip"
+
+    - name: "Transcode H.264 SDR to Balanced HEVC"
+      priority: 80
+      conditions:
+        codec: "h264"
+        is_hdr: "false"
+      action: "transcode"
+      preset: "balanced-hevc"
+      audio_action: "copy"
+      retain_subtitles: true
+
+    - name: "Transcode Legacy MPEG4/DivX to HEVC"
+      priority: 70
+      conditions:
+        codec: "mpeg4,msmpeg4,divx"
+      action: "transcode"
+      preset: "balanced-hevc"
+      audio_action: "copy"
+      retain_subtitles: true
+
+transcoder:
+  hardware_acceleration: "auto" # auto, nvenc, qsv, amf, vaapi, cpu
+  staging_dir: "staging"
+  vmaf_enabled: true
+  vmaf_threshold: 93.0
+  vmaf_sample_count: 3
+  vmaf_sample_duration: 30
+  skip_if_larger: true
+  max_job_duration: "4h"
+
+  presets:
+    - name: "balanced-hevc"
+      video_codec: "hevc"
+      quality_crf: 22
+      preset_speed: "medium" # or p5 for NVENC
+      audio_codec: "copy"
+
+    - name: "efficient-av1"
+      video_codec: "av1"
+      quality_crf: 26
+      preset_speed: "6"
+      audio_codec: "opus"
+      audio_bitrate: "128k"
+
+    - name: "archival-hevc"
+      video_codec: "hevc"
+      quality_crf: 18
+      preset_speed: "slow"
+      audio_codec: "copy"
+
+concurrency:
+  worker_count: 4
+  gpu_semaphore_limit: 2 # max concurrent GPU encoding sessions
+  cpu_semaphore_limit: 4 # max concurrent CPU encoding sessions
+  prefetch_buffer_depth: 50
+  drain_timeout: "5m"
+  retry_max_attempts: 3
+  retry_base_interval: "15s"
+
+notification:
+  enabled: false
+  batch_window: "30s"
+  batch_max_size: 10
+  rate_limit_per_minute: 30
+  channels:
+    - type: "discord"
+      target: "https://discord.com/api/webhooks/your-webhook-id/your-webhook-token"
+      events:
+        - "job_completed"
+        - "job_failed"
+        - "batch_summary"
+
+    - type: "telegram"
+      token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+      target: "-1001234567890" # chat or channel ID
+      events:
+        - "job_completed"
+        - "job_failed"
+
+    - type: "webhook"
+      target: "https://your-api.domain.com/webhooks/mediacruncher"
+      token: "secret-hmac-key"
+      events:
+        - "job_completed"
+        - "job_failed"
+        - "batch_summary"
+
+observability:
+  log_level: "info" # debug, info, warn, error
+  log_json: true
+  metrics_port: 9090

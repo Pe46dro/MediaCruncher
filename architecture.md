@@ -8,15 +8,17 @@ This document provides a production-grade, implementation-ready architectural sp
 
 ### Primary Responsibility
 
-Provide durable, transactional storage for the application's queue entries, job metadata, system settings, and audit logs. The persistence engine serves as the single source of truth for all operational state, enabling recovery across restarts and supporting concurrent read-write access from the concurrency engine. It must operate without any C bindings or CGO dependencies, relying exclusively on a native database driver to maintain build portability across platforms.
+Provide durable, transactional storage for the application's queue entries, job metadata, system settings, and audit logs. The persistence engine serves as the single authoritative source of truth for all operational state and task lifecycle stages, enabling deterministic recovery across restarts and supporting concurrent read access alongside serialized write mutations. In-memory queue structures in downstream modules function strictly as bounded prefetch buffers of this persistent state. The engine must operate without any C bindings or CGO dependencies, relying exclusively on a native pure Go database driver to maintain build portability across platforms.
 
 ### Core Data Structures
 
-The persistence layer manages four logical tables, each representing a distinct domain entity:
+The persistence layer manages four logical tables, each representing a distinct domain entity, operating under a mandatory engine configuration profile:
 
-- Queue Entries: Records pending transcoding jobs with fields for source file path, current processing state, assigned worker identifier, priority level, retry count, creation timestamp, and scheduled execution time. Each entry carries a unique surrogate key and supports indexed lookups by state, priority, and worker assignment.
+- Database Configuration Profile: The engine enforces write-ahead logging and concurrent reader semantics via explicit pragmas applied at connection initialization: WAL journal mode (`PRAGMA journal_mode = WAL`), synchronized normal flush (`PRAGMA synchronous = NORMAL`), extended busy handler timeout (`PRAGMA busy_timeout = 5000`), and strict foreign key validation (`PRAGMA foreign_keys = ON`).
 
-- Job Metadata: Stores the full analysis results produced by the evaluation pipeline for each media file. This includes extracted video and audio codec information, resolution, frame rate, bit rate, duration, language tracks, subtitle streams, and the decision rendered by the rule-matching engine. Metadata entries are linked to their corresponding queue entry via a foreign key relationship.
+- Queue Entries: The authoritative persistent record of all transcoding and evaluation jobs with fields for source file path, current processing state (pending, leased, processing, completed, quality-failed, review-required, permanently-failed), assigned worker identifier, priority level, retry count, creation timestamp, lease expiration timestamp, and scheduled execution time. Each entry carries a unique surrogate key and supports indexed lookups by state, priority, and worker assignment.
+
+- Job Metadata: Stores the full analysis results produced by the evaluation pipeline for each media file. This includes extracted video and audio codec information, resolution, frame rate, bit rate, duration, multi-track audio descriptors, subtitle streams, and the decision rendered by the rule-matching engine. Metadata entries are linked to their corresponding queue entry via a foreign key relationship.
 
 - System Settings: Holds configurable application parameters that persist across restarts. This includes transcoding presets, quality thresholds, worker pool sizing, rate limit configurations, notification channel settings, and scanned path registries. Settings are keyed by a unique identifier and carry a version stamp to support optimistic concurrency control.
 
@@ -24,59 +26,63 @@ The persistence layer manages four logical tables, each representing a distinct 
 
 ### Key Interface Contracts
 
-The persistence engine exposes a connection-oriented interface with the following operational boundaries:
+The persistence engine exposes an actor-mediated interface separating concurrent reads from serialized writes:
 
-- Connection Lifecycle: Opens a database connection from a provided file path, executes a controlled schema migration if needed, and validates the connection through a lightweight ping operation. Closing the connection drains pending transactions, releases the database file lock, and returns a cleanup error if any operation was left incomplete.
+- Single-Writer Actor Architecture: To completely eliminate write contention, lock contention errors (`SQLITE_BUSY`), and deadlock retries across concurrent workers, all write operations (enqueuing, state transitions, metadata upserts, audit appends, settings changes) are submitted to a dedicated, bounded write-request channel. A single background write coordinator goroutine drains this channel and executes all write transactions sequentially using a dedicated, exclusive write connection. Operations return synchronous completion channels or futures to caller workers.
 
-- Transaction Boundary: All write operations execute within explicitly scoped transactions that follow an all-or-nothing guarantee. The interface provides atomic begin-commit and rollback semantics, with automatic rollback triggered by unhandled error recovery within the transaction scope.
+- Concurrent Read Pool: Concurrent workers and reporting queries execute read operations (such as queue prefetching, metadata queries, and settings loads) concurrently through a shared pool of read-only database connections, fully utilizing SQLite WAL mode's concurrent reader capabilities without blocking the write coordinator.
 
-- Queue Operations: Enqueue a new job with state initialization and timestamp setting. Claim the highest-priority available job for a given worker, atomically transitioning it from pending to processing state while recording the worker identifier. Complete or fail a job by transitioning it to the target state with metadata linkage. Requeue a job with incremented retry count and backoff delay when transient failures occur.
+- Connection Lifecycle: Opens the database connections from a provided file path, executes the configuration pragmas, applies controlled schema migrations in ordered transaction blocks, and validates connection health through a ping operation. Closing drains the write channel, flushes remaining transactions, releases file locks, and closes both read and write pools.
+
+- Queue Operations: Enqueue new jobs into persistent storage. Lease the highest-priority batch of pending jobs for prefetching by the concurrency engine, atomically transitioning them to leased/processing state with recorded worker identifiers and lease timeouts. Update job states on completion, quality failure, or fatal error with foreign-key metadata linkage. Requeue jobs with incremented retry count and exponential backoff timestamps when transient failures occur.
 
 - Metadata Operations: Upsert job metadata using the queue entry identifier as the foreign key, creating a new record or updating an existing one. Retrieve full metadata for a given job, or bulk-query metadata across a set of job identifiers for reporting purposes.
 
-- Settings Operations: Load all system settings into a configuration map on startup. Update individual settings by key, with optimistic concurrency enforced through a version column that rejects stale writes. Reload settings on demand to support hot-reload capability.
+- Settings Operations: Load all system settings into an immutable configuration snapshot on startup. Update individual settings by key through the write actor, with optimistic concurrency enforced through a version column that rejects stale writes. Reload settings on demand to support hot-reload capability.
 
-- Audit Operations: Append a single audit log entry or bulk-insert multiple entries within a single transaction. Purge old entries beyond a configurable retention period, retaining a minimum number of recent entries for debugging purposes. Query entries by event type, severity, time range, or job identifier.
+- Audit Operations: Append single or batched audit log entries via the write actor. Purge entries beyond a configurable retention window, retaining a minimum baseline for forensic analysis. Query entries by event type, severity, time range, or job identifier over the read pool.
 
 ### State Flow and Lifecycle
 
 The persistence engine lifecycle follows these phases:
 
-1. Initialization: On application startup, the engine opens the database connection, runs schema migrations if the version is behind, and validates that all required tables and indexes exist. The migration system maintains a version history table and applies incremental changes in order, each migration being a self-contained transaction.
+1. Initialization: On application startup, the engine initializes the database file, applies WAL and integrity pragmas, runs pending migrations sequentially within self-contained transactions, verifies table and index integrity, and starts the write coordinator actor loop.
 
-2. Runtime: During normal operation, the engine serves concurrent read requests through shared read connections and exclusive write requests through a single write connection pool. Queue claim operations are serialized through a write lock to prevent duplicate worker assignments. Metadata writes are batched where possible to reduce transaction overhead.
+2. Runtime: The engine serves concurrent read requests via the read connection pool and routes all mutations through the single write coordinator. Queue prefetch operations retrieve available pending jobs in priority order. When workers complete tasks, completion messages pass through the write channel, ensuring serialized state updates with zero database lock contention. Metadata writes are coalesced into batch transactions where possible.
 
-3. Shutdown: During graceful shutdown, the engine receives a drain notification that prevents new enqueue operations. Pending transactions complete, the connection pool is drained, and the database connection is closed cleanly. The application waits for the shutdown signal before invoking cleanup.
+3. Shutdown: During graceful shutdown, the engine rejects new enqueue submissions, processes and drains remaining writes in the write actor queue, commits all pending write transactions synchronously, closes the read pool, and closes the write connection cleanly.
 
-4. Recovery: On startup after an unclean shutdown, the engine identifies any queue entries left in the processing state and transitions them back to pending, incrementing their retry count. The audit log provides a complete history for diagnosing what caused the interruption.
+4. Recovery: On startup after an unclean shutdown, the engine executes crash recovery: it scans queue entries left in leased or processing states where the lease timestamp has expired, transitions them back to pending, increments their retry count, and logs the recovery event to the audit trail.
 
 ### Error Handling and Recovery Strategy
 
 The persistence engine employs a tiered error handling approach:
 
-- Connection-level failures (database file locked, disk full, file not found) are treated as fatal errors that trigger immediate application shutdown, since no queued work can be processed without persistent state.
+- Connection-level failures (database file inaccessible, disk full, permission denied) are treated as fatal errors that trigger an orderly application shutdown, as work cannot safely proceed without durable state.
 
-- Transaction-level failures (constraint violations, deadlock detection, serialization conflicts) are retried with exponential backoff up to a configurable limit. Deadlock scenarios are detected automatically by the database engine and retried on a different transaction path. After exhausting retries, the failing operation is logged to the audit trail with full error context, and the queue entry is reset to pending state.
+- Write actor failure handling: Transient transaction errors handled by the single-writer actor (e.g. momentary disk latency) are retried internally with exponential backoff before surfacing an error to the calling worker. Because only one goroutine ever writes to the database, `SQLITE_BUSY` contention between application threads is eliminated by design.
 
-- Migration failures are treated as fatal, since the schema must be at the expected version for correct operation. The engine logs the migration version discrepancy and aborts startup.
+- Migration failures are fatal; startup halts immediately if the database schema cannot be brought to the target version cleanly.
 
-- Write-ahead logging is enabled to ensure durability on unclean shutdowns. Every write transaction is committed with synchronous flush to guarantee that completed operations are persisted before the commit response is returned.
+- Write-ahead logging with synchronous normal flush guarantees that all committed write transactions survive application crashes, with full recovery enabled on restart.
 
 ### Integration Points
 
-- Module E (Concurrency Engine): The primary consumer of queue operations. The concurrency engine claims jobs for workers, updates completion state, and reads retry configuration. Communication occurs through the persistence interface with no direct dependency on the database driver.
+- Module E (Concurrency Engine): The primary consumer of queue operations. The concurrency engine prefetches work items from the persistence engine and submits job status transitions through the single-writer actor channel.
 
-- Module C (Evaluation Pipeline): Writes job metadata after analysis completes. The evaluation pipeline may read existing metadata for caching purposes.
+- Module C (Evaluation Pipeline): Writes decision records and job metadata through the write coordinator actor.
 
-- Module F (Notification Engine): Reads audit log entries to generate delivery notifications for specific event types. The notification engine queries the audit log by event type and severity without locking.
+- Module D (Transcoder): Submits transcoding completion, quality verification scores, and failure status updates to the write actor.
 
-- Cross-Cutting (Configuration Management): Loads system settings on startup and during hot-reload cycles. Settings control queue priority ordering, retention periods, and worker pool sizes.
+- Module F (Notification Engine): Queries the audit log via read connections to format notifications and submits delivery records and dead-letter queue entries to the write actor.
 
-- Cross-Cutting (Observability): Publishes queue depth and transaction metrics. Audit log queries feed the reporting subsystem.
+- Cross-Cutting (Configuration Management): Loads system settings on startup and writes hot-reload adjustments through the write actor.
+
+- Cross-Cutting (Observability): Publishes queue depth, transaction throughput, and write channel buffer utilization metrics.
 
 ### Trade-offs and Design Justification
 
-SQLite was selected as the persistence engine over alternatives such as PostgreSQL or embedded key-value stores because the application operates as a single-process daemon with no need for multi-node concurrency or external database hosting. The choice delivers a self-contained deployment with zero infrastructure dependencies. The zero-CGO constraint is satisfied by using a native SQLite driver, which trades some raw write throughput for cross-platform build simplicity. For the expected workload of hundreds to low thousands of files per library scan, the throughput difference is imperceptible. The trade-off of SQLite's single-writer limitation is acceptable because the concurrency engine serializes all write operations through the claimed-worker model, eliminating write contention by design. Write-ahead logging is enabled for durability at the cost of a modest performance penalty on high-frequency small writes, which is mitigated by batching metadata updates within single transactions.
+SQLite was selected over external databases (PostgreSQL, MySQL) because MediaCruncher operates as a self-contained, single-host daemon with zero infrastructure dependencies. The zero-CGO requirement is satisfied by a pure Go SQLite driver, ensuring effortless cross-compilation across all target platforms. While pure Go drivers trade a small degree of raw CPU execution speed compared to C SQLite, write performance is dominated by disk I/O, where WAL mode and transaction batching provide more than sufficient throughput for media library workloads (tens of thousands of operations). The Single-Writer Actor pattern resolves SQLite's fundamental single-writer constraint by architecturally preventing concurrent write attempts at the Go application level, entirely removing database-level locking conflicts, lock starvation, and retry storms. Durable WAL mode with crash recovery provides robust data protection across unclean shutdowns with minimal latency overhead.
 
 ---
 
@@ -84,27 +90,29 @@ SQLite was selected as the persistence engine over alternatives such as PostgreS
 
 ### Primary Responsibility
 
-Discover, catalog, and prepare media files from user-configured scanned paths for processing by the evaluation pipeline. The filesystem engine performs recursive directory traversal, filters files by type and accessibility, detects and deduplicates existing files, and pushes the resulting file list into the processing queue through a backpressure-aware ingestion pipeline. It must handle permission errors, symbolic links, deeply nested structures, and I/O timeouts without aborting the entire scan.
+Discover, catalog, and prepare media files from user-configured scanned paths for processing by the evaluation pipeline. The filesystem engine performs recursive directory traversal, filters files by type and accessibility, detects and deduplicates existing files using a two-tier composite signature, and pushes the resulting file list into the processing queue through a backpressure-aware ingestion pipeline. It handles permission errors, symbolic links, deeply nested structures, extended-length cross-platform paths, and I/O timeouts without aborting the entire scan.
 
 ### Core Data Structures
 
 The filesystem engine maintains three primary abstractions:
 
-- Scan Scope: Represents a user-configured root path along with inclusion and exclusion rules. Each scope carries a list of allowed file extensions, glob-based exclusion patterns, a maximum directory depth limit, a symbolic link policy (follow, skip, or dereference), and a timeout duration for I/O operations. Scopes are validated before traversal begins, and invalid scopes are reported as warnings without halting the scan.
+- Scan Scope: Represents a user-configured root path along with inclusion and exclusion rules. Each scope carries a list of allowed file extensions, glob-based exclusion patterns, a maximum directory depth limit, a symbolic link policy (follow, skip, or dereference), cross-platform path normalization rules (handling Windows UNC paths and extended-length prefixes), and a timeout duration for I/O operations. Scopes are validated before traversal begins, and invalid scopes are reported as warnings without halting the scan.
 
-- File Record: The output unit of the filesystem engine, containing the absolute file path, file size in bytes, last modification time, cryptographic hash of the first and last megabytes for deduplication, media type classification based on extension and MIME sniffing, and a list of warnings encountered during discovery (permission denied, unreadable, unsupported format). File records are the contract between the filesystem engine and the evaluation pipeline.
+- File Record: The output unit of the filesystem engine, containing the normalized absolute file path, exact file size in bytes, last modification time, a composite deduplication signature consisting of exact byte size and cryptographic SHA-256 hashes of the first and last megabytes, media type classification based on extension and MIME sniffing, and a list of warnings encountered during discovery (permission denied, unreadable, unsupported format). File records are the contract between the filesystem engine and the evaluation pipeline.
 
-- Ingestion Buffer: An in-memory bounded queue that collects file records as they are discovered and feeds them to the processing queue at a controlled rate. The buffer has a configurable capacity, applies deduplication against an in-memory hash index, and blocks producers when full to enforce backpressure.
+- Ingestion Buffer: An in-memory bounded queue that collects file records as they are discovered and feeds them to the processing queue at a controlled rate. The buffer has a configurable capacity, applies deduplication against a compact in-memory hash index that stores raw fixed-size byte arrays rather than heap-allocated string representations to minimize garbage collection overhead, and blocks producers when full to enforce backpressure.
 
 ### Key Interface Contracts
 
 The filesystem engine exposes a scanning interface with these operational boundaries:
 
-- Scan Scope Validation: Validates each configured scan scope by verifying path existence, readability, and sane configuration parameters. Returns a list of validation warnings that are included in the scan report but do not prevent the scan from proceeding for valid scopes.
+- Scan Scope Validation and Path Normalization: Validates each configured scan scope by verifying path existence, readability, and configuration sanity. Normalizes file paths across operating systems: converts path separators to uniform standards, resolves symbolic links per policy, and applies Windows extended-length prefixes (`\\?\`) for paths exceeding the 260-character limitation, as well as handling Universal Naming Convention (UNC) paths for network-attached storage.
 
 - Recursive Traversal: Walks each valid scan scope recursively, applying inclusion filters by file extension and exclusion filters by glob pattern. The traversal honors the symbolic link policy and respects depth limits. Each discovered file is classified by media type and a File Record is constructed. Concurrent subdirectory traversal is used to avoid I/O idle time, with a worker limit to prevent resource exhaustion.
 
-- Deduplication: Before emitting each File Record, the engine checks the in-memory hash index. If a file with an identical first-and-last-megabyte hash already exists, a deduplication warning is attached to the record and the file is either skipped or flagged for review based on the deduplication policy configuration. Full cryptographic hash comparison is deferred to the evaluation pipeline to avoid unnecessary I/O on large files.
+- Two-Tier Deduplication: Before emitting each File Record, the engine checks the in-memory index using a two-tier evaluation strategy:
+  1. Size-First Filtering: Exact file size in bytes is compared against known files. If the byte size does not match any known file, the file cannot be a duplicate; no partial hashing I/O is performed.
+  2. Partial Hash Verification: Only when an exact byte-size match occurs does the engine read and compute SHA-256 hashes over the first and last megabytes. Comparing both size and boundary hashes eliminates false positives caused by shared container headers (such as standardized MKV/MP4 metadata or encoder padding) across different media files. If an identical composite signature is found, a deduplication warning is attached, and the file is skipped or flagged per policy. Full cryptographic hashing of the entire file is deferred to the evaluation pipeline only when collision ambiguity requires forensic verification.
 
 - Backpressure-Aware Ingestion: Pushes File Records into the ingestion buffer. When the buffer is full, the discovery process blocks until space is available, creating a natural backpressure signal that slows file discovery to match the downstream processing capacity. When the processing queue rejects an item due to capacity limits, the buffer accumulates, and discovery eventually pauses. An optional overflow policy determines whether blocked items are dropped, buffered with an expanded capacity, or cause the scan to halt entirely.
 
@@ -114,11 +122,11 @@ The filesystem engine exposes a scanning interface with these operational bounda
 
 The filesystem engine lifecycle follows these phases:
 
-1. Configuration: Accepts a list of scan scopes with validation rules. Validates each scope and builds an internal scope graph, resolving overlapping and nested paths to avoid duplicate scans.
+1. Configuration: Accepts a list of scan scopes with validation rules. Validates each scope, normalizes paths, and builds an internal scope graph, resolving overlapping and nested paths to avoid duplicate scans.
 
-2. Discovery: Launches concurrent subdirectory traversal workers for each scope. Each worker independently traverses its assigned directory subtree, applies filters, checks deduplication, and pushes File Records to the ingestion buffer. Workers respect the configured concurrency limit and emit progress updates at regular intervals.
+2. Discovery: Launches concurrent subdirectory traversal workers for each scope. Each worker independently traverses its assigned directory subtree, applies filters, performs two-tier deduplication, and pushes File Records to the ingestion buffer. Workers respect the configured concurrency limit and emit progress updates at regular intervals.
 
-3. Aggregation: As workers complete, the engine aggregates the discovered File Records from the ingestion buffer. A final deduplication pass against a complete hash index eliminates duplicates that were missed during streaming discovery due to files being discovered by different workers in parallel.
+3. Aggregation: As workers complete, the engine aggregates the discovered File Records from the ingestion buffer. A final deduplication pass against a complete composite signature index eliminates duplicates that were missed during streaming discovery due to files being discovered by different workers in parallel.
 
 4. Report: Generates a scan report containing total files discovered, files accepted, files skipped by type filter, files flagged as duplicates, directories skipped due to permission errors, and total scan duration. The report is published to the observability subsystem for monitoring.
 
@@ -138,7 +146,7 @@ The filesystem engine employs a resilient error handling approach:
 
 ### Integration Points
 
-- Module A (Persistence Engine): Pushes processing jobs derived from accepted File Records into the persistence queue. The ingestion contract between the two modules defines the shape and semantics of each queued item.
+- Module A (Persistence Engine): Pushes processing jobs derived from accepted File Records into the persistence queue via the single-writer actor channel. The ingestion contract between the two modules defines the shape and semantics of each queued item.
 
 - Module C (Evaluation Pipeline): Provides the File Records that the evaluation pipeline analyzes. The evaluation pipeline may request additional metadata from the filesystem engine for files where initial analysis produced inconclusive results.
 
@@ -150,7 +158,7 @@ The filesystem engine employs a resilient error handling approach:
 
 ### Trade-offs and Design Justification
 
-Concurrent subdirectory traversal was chosen over sequential traversal because modern storage systems benefit from parallel I/O operations, and the overhead of concurrent execution-unit management is minimal compared to I/O wait times. The worker limit prevents resource exhaustion on systems with thousands of small directories. The in-memory deduplication index trades memory for speed: storing hash entries for millions of files may require several hundred megabytes of RAM, but eliminates the need for database-assisted deduplication during discovery. Full cryptographic hashing is deferred to the evaluation pipeline to avoid reading large files during discovery, which would dramatically slow down the scan. The backpressure-aware ingestion buffer decouples discovery speed from processing speed, allowing the engine to gracefully handle scenarios where the transcoding pipeline is slower than file discovery without dropping work or requiring complex buffering layers.
+Concurrent subdirectory traversal was chosen over sequential traversal because modern storage systems benefit from parallel I/O operations, and the overhead of concurrent execution-unit management is minimal compared to I/O wait times. The worker limit prevents resource exhaustion on systems with thousands of small directories. The two-tier deduplication strategy (exact size check followed by boundary hashes) eliminates wasteful disk reads for non-colliding files while preventing false-positive deduplication collisions on container headers. Storing deduplication signatures as raw binary arrays rather than string allocations ensures minimal memory footprint and zero Go runtime garbage collection thrashing during scans of millions of files. Deferring full-file cryptographic hashing avoids reading entire multi-gigabyte media files during discovery. The backpressure-aware ingestion buffer decouples discovery speed from downstream processing capacity without dropping items.
 
 ---
 
@@ -158,27 +166,27 @@ Concurrent subdirectory traversal was chosen over sequential traversal because m
 
 ### Primary Responsibility
 
-Analyze media files using ffprobe metadata extraction, normalize the extracted data into a consistent internal representation, apply the user-configured rule-matching engine to determine the appropriate action for each file, and persist the decision and supporting metadata to the persistence engine. The evaluation pipeline is the decision-making core of the system, transforming raw file information into actionable processing directives.
+Analyze media files using ffprobe metadata extraction, normalize the extracted data into a consistent internal representation, apply the user-configured rule-matching engine to determine the appropriate action for each file (including multi-stream audio and subtitle preservation directives), and persist the decision and supporting metadata to the persistence engine. The evaluation pipeline is the decision-making core of the system, transforming raw file information into actionable processing and stream-mapping directives.
 
 ### Core Data Structures
 
-- Analysis Result: The primary output of the ffprobe analysis stage, containing extracted video codec, audio codec, resolution, frame rate, bit rate, duration, color space, bit depth, container format, number of streams, stream languages, subtitle presence, and any anomaly flags detected during analysis.
+- Analysis Result: The primary output of the ffprobe analysis stage, containing extracted video codec, color space, bit depth, resolution, frame rate, bit rate, duration, container format, and detailed stream descriptors: all audio streams (codec, channel layout, channel count, sample rate, language tags, default/commentary flags), all subtitle streams (codec format, language tags, forced/SDH flags), and container chapter markers.
 
-- Normalized Metadata: The rule-engine-compatible representation of the analysis result, with all values converted to standard units, standardized codec name mapping (including codec alias resolution), boolean flags for HDR presence and high bit depth, and computed derived fields such as estimated output size at target bitrate.
+- Normalized Metadata: The rule-engine-compatible representation of the analysis result, with all values converted to standard units, standardized codec name mapping (including codec alias resolution), boolean flags for HDR presence (HDR10, Dolby Vision, HLG) and high bit depth, and computed derived fields such as estimated output size at target bitrate.
 
-- Rule Set: A collection of user-defined rules, each with a name, an ordered list of match conditions on normalized metadata fields, an action directive (transcode, stream copy, skip, flag for review), an optional output preset, and an optional priority score for conflict resolution when multiple rules match a file.
+- Rule Set: A collection of user-defined rules, each with a name, an ordered list of match conditions on normalized metadata fields, an action directive (transcode, stream copy, skip, flag for review), an optional output preset, a stream mapping policy (specifying multi-track audio retention, lossless audio passthrough vs. downmixing, and subtitle handling), and an optional priority score for conflict resolution when multiple rules match a file.
 
-- Decision Record: The final output of the evaluation pipeline for each file, containing the matched rule identifier, the chosen action, the output preset (if applicable), any flags or warnings generated during evaluation, and the full normalized metadata as supporting evidence for audit purposes.
+- Decision Record: The final output of the evaluation pipeline for each file, containing the matched rule identifier, the chosen primary action, the output preset (if applicable), an explicit stream mapping specification (specifying per-stream disposition: video transcode parameters, audio stream copying or re-encoding, subtitle track preservation), any flags or warnings generated during evaluation, and the full normalized metadata as supporting evidence for audit purposes.
 
 ### Key Interface Contracts
 
-- Analysis Pipeline: Accepts a file path, invokes ffprobe with appropriate arguments to extract comprehensive metadata, parses the structured output, and constructs an Analysis Result. The pipeline handles ffprobe exit codes, captures stderr output for error diagnostics, and enforces a configurable timeout on the ffprobe invocation. Timeouts result in a flag on the Analysis Result rather than a pipeline failure, allowing the evaluation to proceed with partial data.
+- Analysis Pipeline: Accepts a file path, invokes ffprobe with structured JSON output arguments to extract comprehensive container and stream metadata, parses the structured output, and constructs an Analysis Result. The pipeline handles ffprobe exit codes, captures stderr output for error diagnostics, and enforces a configurable timeout on the ffprobe invocation. Timeouts result in a flag on the Analysis Result rather than a pipeline failure, allowing the evaluation to proceed with partial data.
 
 - Normalization: Transforms an Analysis Result into Normalized Metadata by applying unit conversions, codec name standardization, and derived field computation. Normalization is deterministic and idempotent: running it on the same Analysis Result always produces the same Normalized Metadata.
 
-- Rule Matching: Evaluates a file's Normalized Metadata against the full rule set in priority order. Each rule's conditions are evaluated in sequence, and the first matching rule determines the decision. If multiple rules match at the same priority level, the rule with the most specific condition match count wins. If no rules match, the default rule (configured at rule set level) applies.
+- Rule Matching and Stream Mapping Synthesis: Evaluates a file's Normalized Metadata against the full rule set in priority order. Each rule's conditions are evaluated in sequence, and the first matching rule determines the primary decision. Simultaneously, the engine synthesizes explicit stream mapping directives (`-map 0:v -map 0:a -map 0:s?` with per-stream disposition) according to configured preservation rules. This ensures high-definition surround sound (e.g., TrueHD, DTS-HD MA, Dolby Atmos) can be passed through via direct stream copy while video is transcoded, and all relevant language and subtitle tracks are retained. If multiple rules match at the same priority level, the rule with the most specific condition match count wins. If no rules match, the default rule applies.
 
-- Decision Persistence: Writes the Decision Record to the persistence engine, linking it to the corresponding queue entry. The write includes the full normalized metadata as audit evidence, even when the decision is to skip the file.
+- Decision Persistence: Submits the Decision Record and full metadata payload to Module A via the single-writer actor channel, linking it to the corresponding queue entry. The write includes the full normalized metadata as audit evidence, even when the decision is to skip the file.
 
 ### State Flow and Lifecycle
 
@@ -190,11 +198,11 @@ The evaluation pipeline lifecycle for each file follows these phases:
 
 3. Normalization: The Analysis Result is normalized into standard form. Codec aliases are resolved, units are standardized, and derived fields are computed.
 
-4. Evaluation: The normalized metadata is matched against the rule set. The matching engine evaluates conditions in order and produces a Decision Record.
+4. Evaluation and Mapping Synthesis: The normalized metadata is matched against the rule set. The matching engine evaluates conditions in order, determines the primary action, and synthesizes the per-stream mapping directives.
 
-5. Persistence: The Decision Record is written to the persistence engine within the same transaction that updates the queue entry state to the decision outcome.
+5. Persistence: The Decision Record is submitted to Module A's write actor channel, updating the queue entry state and storing the metadata within a single transactional write block.
 
-6. Completion: The pipeline signals completion to the concurrency engine with the decision outcome, file processing duration, and any errors encountered during analysis.
+6. Completion: The pipeline signals completion to the concurrency engine with the decision outcome, synthesized stream mapping directives, file processing duration, and any errors encountered during analysis.
 
 ### Error Handling and Recovery Strategy
 
@@ -208,9 +216,9 @@ The evaluation pipeline lifecycle for each file follows these phases:
 
 ### Integration Points
 
-- Module A (Persistence Engine): Writes Decision Records and reads rule set configuration from system settings. Reads the queue entry to update processing state.
+- Module A (Persistence Engine): Writes Decision Records and metadata via the single-writer actor channel. Reads rule set configuration from system settings.
 
-- Module D (Transcoder): Receives the Decision Record and output preset to determine transcoding parameters. If the decision is to transcode, the transcoder reads the preset and source file information.
+- Module D (Transcoder): Receives the Decision Record, output preset, and explicit stream mapping directives to drive transcoding parameters and stream copy operations.
 
 - Module E (Concurrency Engine): Receives evaluation results to determine next steps. Evaluation outcome drives the concurrency engine's job routing decisions.
 
@@ -220,7 +228,7 @@ The evaluation pipeline lifecycle for each file follows these phases:
 
 ### Trade-offs and Design Justification
 
-The decoupling of analysis, normalization, and rule matching into separate stages provides clarity and testability. ffprobe is invoked as an external process rather than through library bindings to avoid CGO dependencies and to isolate potential crashes or memory issues in the external tool from the application runtime. The in-memory rule set cache avoids repeated file I/O on rule set updates, which typically occur infrequently. Deferring transcoding decisions to the concurrency engine (rather than having the evaluation pipeline dispatch transcoding directly) provides a clean separation between analysis and execution, allowing the concurrency engine to apply backpressure and priority-based scheduling on top of evaluation outcomes.
+The decoupling of analysis, normalization, and rule matching into separate stages provides clarity and testability. ffprobe is invoked as an external process rather than through library bindings to avoid CGO dependencies and to isolate potential crashes or memory issues in the external tool from the application runtime. Synthesizing explicit per-stream mapping directives during evaluation eliminates guesswork in the transcoder, guaranteeing that multi-channel surround tracks and subtitles are preserved rather than inadvertently discarded. The in-memory rule set cache avoids repeated file I/O on rule set updates. Deferring transcoding execution to the concurrency engine provides a clean separation between analysis and execution, allowing priority-based scheduling and resource semaphores to govern heavy transcoding tasks.
 
 ---
 
@@ -228,71 +236,75 @@ The decoupling of analysis, normalization, and rule matching into separate stage
 
 ### Primary Responsibility
 
-Execute media transcoding operations based on decisions from the evaluation pipeline, utilizing hardware-accelerated encoding when available, performing quality verification through VMAF scoring, managing temporary files and staging directories, and enforcing quality thresholds before committing transcoded output. The transcoder is the heaviest resource consumer in the system and must handle codec negotiation, GPU resource contention, corruption detection, and safe file operations.
+Execute media transcoding operations based on decisions from the evaluation pipeline, utilizing hardware-accelerated encoding under strict hardware session limits, performing high-throughput quality verification through stratified segment VMAF scoring and fast metric pre-filtering, managing temporary files and staging directories across filesystem boundaries, and enforcing quality thresholds before committing transcoded output. The transcoder is the heaviest resource consumer in the system and handles codec negotiation, GPU session concurrency limits, cross-device atomic moves, corruption detection, and safe in-place replacements.
 
 ### Core Data Structures
 
-- Hardware Capability Profile: A snapshot of available hardware encoding resources, including GPU device enumeration, supported codec-acceleration mappings (which codecs are hardware-accelerated on which devices), device thermal and utilization status, and memory availability. The profile is refreshed periodically or on-demand when encoding failures suggest hardware issues.
+- Hardware Capability Profile: A snapshot of available hardware encoding resources, including GPU device enumeration, supported codec-acceleration mappings (which codecs are hardware-accelerated on which devices), device thermal and utilization status, concurrent session caps (e.g. NVENC maximum concurrent session limits), and available video RAM. The profile is refreshed periodically or on-demand when encoding failures suggest hardware issues.
 
-- Encoding Preset: A configuration of encoding parameters derived from the evaluation pipeline's output preset, including target codec, quality level, resolution constraints, bitrate targets, preset speed, and audio parameters. Presets are validated against the available hardware capabilities before encoding begins.
+- Encoding Preset: A configuration of encoding parameters derived from the evaluation pipeline's output preset and stream mapping directives, including target video codec, quality rate-control parameters (CRF/CQ/bitrate targets), resolution constraints, preset speed, multi-track audio copy or re-encode configurations, and subtitle passthrough options. Presets are validated against available hardware capabilities before encoding begins.
 
-- Transcode Job: The execution unit for the transcoder, containing the source file path, output path, encoding preset, hardware acceleration preference, VMAF verification parameters, and job lifecycle state.
+- Transcode Job: The execution unit for the transcoder, containing the source file path, output destination path, encoding preset, explicit stream mapping directives from Module C, hardware acceleration preferences, GPU session permit token, VMAF verification parameters, and job lifecycle state.
 
-- Verification Result: The output of VMAF quality verification, containing the computed VMAF score, per-segment scores if segmented verification is used, and a pass-fail determination against the configured quality threshold.
+- Verification Result: The output of the quality verification stage, containing the fast SSIM/PSNR pre-filter score, computed per-segment VMAF scores from stratified time slices, the composite weighted VMAF score, and a pass-fail determination against configured quality thresholds.
 
 ### Key Interface Contracts
 
-- Hardware Discovery: Queries the system for available GPU devices and their encoding capabilities. Returns a capability map that lists supported codecs per device, including h.264, h.265, and AV1. The discovery service respects a configured fallback order: preferred device first, then secondary devices, then software encoding as a last resort.
+- Hardware Discovery and Session Negotiation: Queries the system for available GPU devices and their encoding capabilities (including NVENC, QuickSync, and VAAPI). Given an encoding preset, the transcoder negotiates the target codec and acceleration method. To prevent GPU out-of-memory crashes and driver-level session rejections, hardware encoding requires acquiring a permit from Module E's GPU worker semaphore. If hardware acceleration is unavailable, permits are exhausted, or session initialization fails, the transcoder automatically falls back to software encoding with an informational audit log entry.
 
-- Codec Negotiation: Given an encoding preset and the hardware capability map, selects the actual codec and acceleration method. If hardware encoding is requested but unavailable for the target codec, the transcoder falls back to software encoding with a downgrade log entry.
+- Encoding Execution: Launches the external ffmpeg encoding process with explicit stream mappings (`-map`) and preset parameters. Output is written exclusively to a dedicated staging directory to prevent partial output from being accessed by media libraries or scanner daemons. The transcoder monitors process progress, resource utilization, and return codes.
 
-- Encoding Execution: Launches the encoding process with the selected parameters, streams to a staging directory to prevent partial output from being mistaken for final output, monitors process completion, and returns an encoding result with duration, output file size, and exit code.
+- Stratified VMAF Quality Verification: To avoid system throughput collapse where full-file VMAF verification can exceed the duration of the transcode itself, the transcoder executes a high-efficiency tiered verification pipeline:
+  1. Fast SSIM/PSNR Pre-filter: Fast structural similarity metrics are computed during or immediately following transcode execution. If metric scores indicate severe degradation, the encode is rejected early without additional overhead.
+  2. Stratified Segment Sampling: When pre-filtering passes, the transcoder extracts three to five representative 30-second clips sampled across evenly distributed runtime percentiles (e.g., 15%, 50%, and 85% timestamps) from both original and transcoded files. VMAF is calculated across these sample segments, achieving over 98% statistical correlation with full-file scoring while reducing verification time by up to 95%.
+  3. Master Archival Override: Full-file VMAF verification is retained as an opt-in configuration exclusively for master archival presets where absolute whole-file scoring is mandated.
 
-- VMAF Verification: After successful encoding, runs VMAF quality verification comparing the original and transcoded files. The verification process accepts the original file path, transcoded file path, and a quality threshold value. It returns a verification result with the computed score and a pass-fail determination.
+- Resilient File Management and Cross-Filesystem Promotion: Manages temporary staging files with atomic guarantees across disparate storage devices:
+  1. Intra-Filesystem Move: When staging and destination reside on the same filesystem/volume, the transcoder commits output via atomic operating system rename (`os.Rename`).
+  2. Cross-Device Fallback (`EXDEV`): When staging (e.g. fast local NVMe SSD) and destination (e.g. network SMB/NFS share or secondary storage pool) span different mount points, an atomic rename fails with an `EXDEV` error. The transcoder catches this error, executes a buffered streaming copy to a temporary file (`.media_cruncher_tmp`) on the destination volume, validates file size and checksum integrity against the staged file, performs an atomic intra-filesystem rename on the destination to promote the file, and removes the staged artifact.
+  3. Safe In-Place Replacement: When replacing an existing source file, the transcoder renames the source to a temporary `.backup` path before promoting the new transcode. The backup is unlinked only after the new file passes corruption checks and promotion succeeds; if promotion fails, the backup is restored immediately.
 
-- File Management: Manages temporary staging files throughout the transcoding lifecycle with idempotent operations: creating a staging directory when needed, overwriting existing staged files with the same job identifier, and cleaning up on failure. On success, moves the staged output to the final output location. On failure, cleans up all temporary files. If a failure occurs during the move operation, the staged file is preserved for inspection and the job is marked for manual review.
-
-- Corruption Detection: Validates the transcoded output file by attempting to open it with ffprobe and verify stream integrity. If the file is corrupted or unreadable, the job fails and the transcoder attempts to re-encode with software encoding as a recovery attempt.
+- Corruption Detection: Validates transcoded media before promotion by opening the file with ffprobe to verify stream headers, packet continuity, and decoding integrity. If corruption is detected, the job is failed and marked for software re-encoding recovery.
 
 ### State Flow and Lifecycle
 
 The transcoder lifecycle for each job follows these phases:
 
-1. Preparation: The transcoder receives a transcode job from the concurrency engine with a cancellation context that can be aborted if the worker is draining. It validates the source file exists and is readable, checks the target output location for conflicts, and allocates a staging directory for the encoding output.
+1. Preparation: The transcoder receives a transcode job with explicit stream mappings and cancellation context. It validates source file readability, checks destination disk capacity, and allocates an isolated staging workspace.
 
-2. Hardware Selection: The transcoder consults the hardware capability map and negotiates the codec and acceleration method based on the encoding preset. If hardware encoding is selected, the transcoder verifies that the GPU is available and not in a thermal throttled state.
+2. Resource Allocation: If hardware encoding is requested, the transcoder acquires a GPU session permit from the concurrency engine. If permits are unavailable or the GPU is thermal-throttled, it falls back to software encoding.
 
-3. Encoding: The transcoder launches the encoding process with the configured parameters, monitoring for process errors. Output is written to the staging directory. If encoding fails, the transcoder attempts software encoding as a fallback if the failure was hardware-related.
+3. Encoding: Launches the ffmpeg process writing to the staging workspace. Subprocess execution is tied to the parent cancellation context and child process supervisor.
 
-4. Verification: After successful encoding, VMAF verification is run. If the score meets the quality threshold, the transcoder proceeds. If the score is below the threshold, the transcoder attempts a re-encode with adjusted parameters (higher quality, lower speed preset) once. If the second attempt also fails verification, the job is marked as quality-failed and flagged for review.
+4. Verification: On encode completion, the transcoder releases the GPU session permit immediately, freeing hardware resources for waiting jobs. It executes corruption verification, runs fast SSIM pre-filtering, and performs stratified segment VMAF scoring. If verification fails, a single retry with higher-quality rate control parameters is attempted. If verification fails a second time, the job is marked as quality-failed and flagged for review.
 
-5. Commit or Cleanup: On successful verification, the staged output is moved to the final output location. On failure, all staging files are cleaned up, and the job state is updated in the persistence engine to reflect the failure outcome.
+5. Promotion or Cleanup: On successful verification, the staged file is promoted to the destination using atomic rename or validated cross-device streaming copy. Staging workspaces are unlinked. On failure, temporary files are cleared, and the failure status is sent to Module A via the write actor.
 
 ### Error Handling and Recovery Strategy
 
-- Hardware encoding failures that indicate a device-level issue (GPU reset, driver crash, out of video memory) trigger a device health check. If the device passes the health check, the transcoder retries with software encoding. If the device fails, the device is marked as unavailable in the capability map and all pending jobs using that device are reassigned.
+- Hardware encoding failures (driver crash, out-of-memory, NVENC session limit reached) cause the transcoder to release its GPU permit, mark the hardware profile as degraded, and seamlessly retry the transcode using CPU software encoding.
 
-- VMAF verification failures are not immediately fatal. A single retry with adjusted parameters is attempted. Only after the retry fails is the job marked as quality-failed.
+- VMAF quality failures trigger a single automated retry with adjusted quality parameters (e.g. lower CRF/CQ value and slower preset speed). If quality remains below threshold, the job is preserved in a quality-failed state for administrative review.
 
-- File system errors during staging file creation or output move operations cause the job to fail with a detailed error. Staging files are preserved for a configurable period before cleanup to allow forensic analysis.
+- Cross-device copy interruptions or disk-full errors on destination abort promotion, leave original source files untouched, preserve the staged file for diagnostic inspection, and log a high-severity error.
 
-- Transcoding timeout errors (job exceeds the configured maximum duration) cause the process to be terminated and the job to be requeued. The timeout threshold is scaled based on source file duration to avoid premature termination of long encodes.
+- Transcoding timeouts terminate child processes cleanly via process group cancellation and requeue the job with exponential backoff.
 
 ### Integration Points
 
-- Module A (Persistence Engine): Updates job state on completion (success, quality-failed, error). Reads encoding presets from system settings.
+- Module A (Persistence Engine): Receives transcode completion, quality metrics, and failure status updates via the single-writer actor channel.
 
-- Module C (Evaluation Pipeline): Receives the Decision Record and output preset to determine encoding parameters.
+- Module C (Evaluation Pipeline): Provides Decision Records, encoding presets, and explicit stream mapping specifications.
 
-- Module E (Concurrency Engine): Receives transcode job dispatches and reports completion status. The concurrency engine manages the job lifecycle boundaries.
+- Module E (Concurrency Engine): Dispatches transcode tasks and coordinates GPU session permits via resource semaphores.
 
-- Cross-Cutting (Configuration Management): Reads hardware acceleration preferences, VMAF threshold values, encoding presets, and maximum encoding duration.
+- Cross-Cutting (Configuration Management): Reads hardware preferences, VMAF sampling thresholds, presets, and timeout rules.
 
-- Cross-Cutting (Observability): Publishes encoding duration, quality scores, hardware utilization, and success-failure rates.
+- Cross-Cutting (Observability): Publishes encode durations, segment VMAF scores, GPU session utilization, and transcode throughput metrics.
 
 ### Trade-offs and Design Justification
 
-Staging files are used to prevent partial output from contaminating the output directory, which adds disk I/O overhead (write to staging, then move to output) but eliminates race conditions where another process reads a partially written output file. The VMAF verification is performed on the full file rather than a subset to provide the most accurate quality assessment, which increases encoding pipeline duration but ensures quality compliance. Hardware encoding is preferred for supported codecs but falls back to software encoding to maintain functionality on systems with limited GPU capabilities. The single-retry policy for quality failures balances thoroughness against pipeline throughput: a single retry catches transient hardware issues without creating long retry loops. Temporary file cleanup is deferred in failure cases to enable forensic analysis, with a configurable retention period that is periodically cleaned by a background maintenance operation. All media processing operations in the transcoder — including ffmpeg encoding, VMAF quality verification, and ffprobe-based corruption detection — are implemented as external process invocations rather than library bindings, maintaining the zero-CGO constraint by design and isolating crashes or memory issues in the media tools from the application runtime at the cost of inter-process communication overhead and process spawn latency.
+Stratified segment sampling was chosen over full-file VMAF because full-file verification introduces an unsustainable 50-70% processing time penalty per file, creating a massive throughput bottleneck for large libraries; stratified sampling delivers near-identical quality governance in a fraction of the time. The multi-tiered file promotion strategy accommodates realistic storage architectures where fast local NVMe SSDs are used for staging while media libraries reside on network-attached storage (NAS) or separate disk arrays, overcoming operating system `EXDEV` cross-device link limitations without risking destination corruption. Coordinating GPU session permits via concurrency semaphores prevents driver crashes and hardware session rejection on consumer GPUs, ensuring deterministic hardware utilization without overloading video memory. External CLI process invocation isolates media processing crashes from the core Go runtime, maintaining the zero-CGO constraint.
 
 ---
 
@@ -300,81 +312,83 @@ Staging files are used to prevent partial output from contaminating the output d
 
 ### Primary Responsibility
 
-Orchestrate the concurrent processing of transcoding jobs across a configurable pool of workers, implementing priority-based task routing, backpressure-aware concurrency control, graceful worker lifecycle management, and retry logic with exponential backoff. The concurrency engine is the operational heart of the system, transforming the ordered queue of pending work into parallel execution while respecting resource limits, enforcing cancellation through context propagation, and transitioning to a drain phase during shutdown.
+Orchestrate the concurrent processing of transcoding jobs across a configurable pool of workers, implementing priority-based task routing, resource-weighted concurrency control (with dedicated GPU session semaphores to protect hardware encoders), graceful worker lifecycle management, and retry logic with exponential backoff. The concurrency engine acts as the operational orchestrator, utilizing a bounded in-memory prefetch buffer that continuously draws from the single authoritative persistent SQLite queue in Module A, enforcing cancellation through context propagation, and executing an orderly drain phase during shutdown.
 
 ### Core Data Structures
 
-- Task Queue: An in-memory priority queue that holds pending work items ordered by priority level and submission time. The queue supports atomic claim operations that remove the highest-priority available item for a specific worker, preventing duplicate assignments. The queue carries a configurable maximum depth that triggers backpressure when full.
+- Task Prefetch Queue: A bounded in-memory priority buffer that holds pre-leased work items ordered by priority level and submission time. The prefetch queue continuously leases the highest-priority pending items from Module A's authoritative SQLite `Queue Entries` table, eliminating the dual-queue split-brain hazard while providing sub-millisecond dispatch to idle workers. The queue carries a configurable buffer depth that applies backpressure upstream when saturated.
 
-- Worker Pool: A collection of active and idle workers, each associated with a processing context that carries cancellation signals for lifecycle management. The pool tracks worker state (idle, processing, draining, stopped), the current job assignment, and processing statistics per worker.
+- Worker Pool and Resource Semaphores: A collection of active and idle worker goroutines, governed by dual concurrency controls:
+  1. General Worker Pool: Manages worker states (idle, processing, draining, stopped), worker cancellation contexts, and processing statistics.
+  2. Resource-Weighted Semaphores: Workers dispatching transcode jobs must acquire permits from a dedicated `GPUWorkerSemaphore` (dimensioned strictly by hardware capability profile, e.g. 2 to 4 concurrent NVENC/QSV sessions) before attempting hardware acceleration, while CPU-intensive tasks draw from a `CPUWorkerSemaphore` dimensioned by available CPU cores. This prevents GPU driver rejections, out-of-memory panics, and thread thrashing.
 
 - Routing Table: A mapping of evaluation outcomes to worker dispatch strategies. After a file is evaluated, the routing table determines whether the work item should be dispatched to a transcoder worker, sent for notification processing, or marked complete. The routing table is configured by the evaluation pipeline's decision outcomes.
 
 - Retry Record: Metadata attached to queue entries that have failed processing, tracking the retry count, next scheduled retry time based on exponential backoff, the failure reason, and whether the maximum retry limit has been reached.
 
-- Batch Splitter: A mechanism for decomposing large work items into smaller sub-tasks that are distributed across the worker pool for parallel processing. The batch splitter accepts a large job, partitions it into independent sub-tasks (such as splitting a multi-stream media file into per-stream analysis tasks), assigns each sub-task to the worker pool with appropriate priority inheritance from the parent job, and reassembles sub-task results into a unified outcome. The batch splitter preserves priority ordering by inheriting the parent job's priority for all sub-tasks and maintaining a result assembly queue that waits for all sub-tasks to complete before emitting the combined result.
+- Batch Splitter: A mechanism for decomposing large batch scanning results into staged pipeline waves. The batch splitter partitions large filesystem discovery batches into balanced sub-batches across the worker pool, coordinating dependencies between sequential lifecycle phases (evaluation phase $\rightarrow$ transcode phase $\rightarrow$ verification phase) while preserving parent priority inheritance and emitting unified scan progress metrics.
 
 ### Key Interface Contracts
 
-- Task Submission: Accepts work items from the ingestion pipeline (file paths for evaluation) and the filesystem engine (completed scan items). Items are enqueued with a priority level and a job type classifier (evaluate, transcode, notify). The submission interface returns a status indicating acceptance or rejection due to queue capacity limits, triggering backpressure upstream.
+- Task Ingestion and Persistence Enqueue: Accepts work items from the filesystem engine (discovered file records) and persists them immediately to Module A's `Queue Entries` table via the single-writer actor channel. Ingestion items are assigned a priority level and job type (evaluate, transcode, notify). When the persistent queue or in-memory prefetch buffer reaches capacity limits, upstream ingestion blocks, enforcing backpressure.
 
-- Priority Claim: Workers claim the highest-priority available item for their job type. The claim operation is atomic: only one worker can claim a specific item, and the item transitions from pending to processing state with the worker identifier recorded. Items are claimed in priority order within each job type, with lower-priority items served only when all higher-priority items are in progress or queued.
+- Priority Prefetch and Lease: The concurrency engine maintains a continuous background prefetch loop that queries Module A's read pool for the highest-priority `pending` entries and atomically transitions them to `leased` via the write actor. Leased items populate the in-memory prefetch queue. Workers claim items from this buffer instantaneously without encountering database lock contention.
 
-- Worker Dispatch: Routes a claimed item to the appropriate processing stage based on its job type. Evaluation items are dispatched to the evaluation pipeline module. Transcode items are dispatched to the transcoder module. Notification items are dispatched to the notification module. The dispatch operation creates a cancellation context for the worker and returns a result sink for collecting the outcome.
+- Resource-Aware Worker Dispatch: Routes claimed items to target modules based on job type:
+  - Evaluation items dispatch to Module C without requiring GPU permits.
+  - Transcode items inspect the preset: if hardware acceleration is specified, the worker acquires a permit from the `GPUWorkerSemaphore`. If all GPU permits are active, the worker either waits for an available permit or falls back to software encoding per configuration, then dispatches to Module D.
+  - Notification items dispatch to Module F.
+  The dispatch creates an isolated cancellation context tied to the worker and OS process supervisor.
 
-- Result Collection: Collects the outcome from dispatched workers, including success, failure with error detail, or timeout. On success, the result is processed according to the routing table (e.g., a successful evaluation may enqueue a transcode job). On failure, the retry logic determines whether to requeue the item with an exponential backoff delay or mark it as permanently failed.
+- Result Collection: Collects the outcome from dispatched workers. On success, the worker releases any acquired GPU semaphores and submits completion status to Module A's write actor. The routing table enqueues follow-up tasks (e.g. evaluation success triggers transcode staging). On failure, the retry logic schedules exponential backoff or marks the entry as permanently failed.
 
-- Backpressure Enforcement: When the task queue reaches its configured capacity, new task submissions are blocked until space becomes available through worker completion. The backpressure signal propagates upstream: ingestion slows when evaluation queues fill, evaluation slows when transcode queues fill, creating a cascading flow-control mechanism.
+- Backpressure Enforcement: When the prefetch buffer or persistent queue reaches capacity, new task submissions from the filesystem engine are paused. Upstream discovery workers block on ingestion channel writes, preventing memory bloat.
 
-- Worker Lifecycle: Initializes the configured number of workers, each running an independent processing loop that claims items, dispatches work, collects results, and repeats. During graceful shutdown, the engine transitions to a drain phase: no new items are accepted, existing workers complete their current assignments, and the engine waits for all workers to finish before reporting completion.
+- Worker Lifecycle and Drain Phase: Initializes worker pools with individual cancellation contexts. During graceful shutdown, the engine transitions to a drain phase: the prefetch loop stops, in-flight jobs complete within a configured drain timeout, and GPU/CPU semaphores are cleanly released.
 
 ### State Flow and Lifecycle
 
 The concurrency engine lifecycle follows these phases:
 
-1. Initialization: The engine creates the task queue with configured priority levels and capacity limits, initializes the worker pool with the specified worker count, and establishes the routing table based on evaluation outcomes and transcode decisions. Each worker is launched with its own cancellation context.
+1. Initialization: The engine initializes worker pools and resource semaphores (GPU and CPU pools), launches the prefetch synchronization loop against Module A's persistent database, and establishes routing tables.
 
-2. Processing: Workers continuously claim items from the task queue and dispatch them to the appropriate processing modules. Results are collected, routed, and either enqueued as follow-up work (evaluation results trigger transcode jobs) or marked as complete. The engine monitors queue depths and worker utilization, publishing metrics at regular intervals.
+2. Processing: The prefetch loop leases pending jobs from SQLite and feeds the in-memory buffer. Workers pull items from the buffer, acquire appropriate resource semaphores, and dispatch to processing modules. Results flow back to the write actor in Module A.
 
-3. Retry Handling: Failed jobs enter the retry record system. The first retry is scheduled after a base backoff interval. Each subsequent failure doubles the backoff interval up to a configured maximum. If the retry count reaches the maximum, the job is marked as permanently failed and flagged for review in the persistence engine.
+3. Retry Handling: When transient failures occur, the job's retry count is incremented, and its next execution timestamp is calculated using exponential backoff with jitter. The state is updated in SQLite via the write actor.
 
-4. Drain Phase: During graceful shutdown, the engine stops accepting new task submissions, signals all workers to stop after their current assignment completes, and waits for all workers to finish. In-progress jobs complete normally; new items are rejected. The engine waits up to a configured drain timeout before forcibly stopping remaining workers.
+4. Drain Phase: During graceful shutdown, the engine stops prefetching, halts new ingestion, notifies workers to drain current tasks, and waits for active transcodes and evaluations to complete up to the drain timeout. Operations exceeding the timeout are canceled via context, safely terminating child processes.
 
-5. Shutdown: After all workers have completed or been stopped, the engine records final statistics, flushes any pending audit log entries, and reports the drain completion status to the shutdown coordinator.
+5. Shutdown: After workers stop and semaphores release, final metrics are flushed, and shutdown completion is signaled to the shutdown coordinator.
 
 ### Error Handling and Recovery Strategy
 
-- Queue capacity overflow: When the task queue is full and new items cannot be enqueued, the upstream module (filesystem engine, evaluation pipeline, or external submission) is signalled to slow down. The blocked submission retries after a short interval. If the queue remains full for an extended period, the engine logs a warning about sustained backpressure.
+- Queue capacity overflow: When the task prefetch queue is full, the filesystem engine ingestion buffer pauses traversal, preventing memory exhaustion.
 
-- Worker crashes: If a worker process terminates unexpectedly, the in-flight job is requeued with incremented retry count. The worker pool automatically replaces the crashed worker with a new instance. The job is re-evaluated from the beginning of its processing stage.
+- Worker crashes: If a worker panics or crashes, its assigned job's lease expires. The crash recovery routine resets expired leased jobs to `pending` with an incremented retry count, and a new worker goroutine is spawned automatically.
 
-- Dispatch failures: If the target processing module (evaluation pipeline or transcoder) cannot accept a dispatch (e.g., the module is unhealthy or the context is cancelled), the job is requeued with a brief delay. Repeated dispatch failures to the same module cause the engine to mark that module as degraded and log a warning.
+- GPU session exhaustion: If a hardware acceleration session fails during transcode dispatch, the worker releases its GPU permit and immediately falls back to software encoding under the CPU semaphore.
 
-- Timeout handling: Each dispatched job has a configurable timeout. If the job exceeds its timeout, the worker's cancellation context is triggered, the in-flight operation should abort, and the result is treated as a timeout failure. The job enters the retry cycle with exponential backoff.
+- Timeout handling: Jobs exceeding configured execution timeouts trigger parent context cancellation. The child process supervisor terminates the underlying ffmpeg or ffprobe process cleanly, and the job enters exponential backoff retry.
 
 ### Integration Points
 
-- Module A (Persistence Engine): Reads pending queue entries on startup after recovery, claims jobs by updating queue entry state to processing, and writes completion or failure state transitions.
+- Module A (Persistence Engine): The authoritative backing store. Module E prefetches pending jobs from Module A and submits lease, progress, completion, and retry updates to the write actor.
 
-- Module B (Filesystem Engine): Receives scan result items through the task submission interface when the filesystem engine pushes completed scan items into the processing pipeline.
+- Module B (Filesystem Engine): Pushes discovered file records into Module E's ingestion interface.
 
-- Module C (Evaluation Pipeline): Receives evaluation task dispatches from the task queue. The concurrency engine collects evaluation results and routes them based on the routing table.
+- Module C (Evaluation Pipeline): Receives evaluation task dispatches and returns normalized metadata and decision records.
 
-- Module D (Transcoder): Receives transcode task dispatches. The concurrency engine collects transcoding results and reports completion status.
+- Module D (Transcoder): Receives transcode task dispatches; worker dispatches are regulated by Module E's `GPUWorkerSemaphore`.
 
-- Module F (Notification Engine): Receives notification task dispatches for events that require outbound communication.
+- Module F (Notification Engine): Receives operational event dispatches for external delivery.
 
-- Cross-Cutting (Configuration Management): Reads worker pool size, queue capacity, retry policies, backoff settings, and drain timeout from centralized configuration.
+- Cross-Cutting (Configuration Management): Reads worker pool sizes, GPU semaphore capacities, backoff settings, and drain timeouts.
 
-- Cross-Cutting (Graceful Shutdown): Receives the shutdown signal and orchestrates the drain sequence. Reports drain completion to the shutdown coordinator.
-
-- Cross-Cutting (Observability): Publishes queue depth, worker utilization, task completion rates, retry counts, and backpressure duration metrics.
+- Cross-Cutting (Observability): Publishes queue depth, GPU/CPU semaphore utilization, worker idle/busy ratios, and backpressure metrics.
 
 ### Trade-offs and Design Justification
 
-Constraints addressed: backpressure via task queue capacity limits, context propagation through cancellation contexts on each worker, graceful shutdown via drain phase transitions.
-
-An in-memory task queue was chosen over a persistent queue to minimize latency and avoid the complexity of distributed task management for a single-process daemon. The zero-CGO constraint is satisfied by implementing the priority queue entirely within the application runtime, without any external C library dependencies. The worker pool model with context-based cancellation provides fine-grained control over worker lifecycle and shutdown behavior without requiring external process management. The exponential backoff retry policy prevents thundering herd scenarios where many retried jobs flood the system simultaneously. Backpressure is enforced at the queue submission level rather than through rate limiting, creating a natural flow-control mechanism that adapts to actual system load rather than a fixed rate. The routing table approach decouples the concurrency engine from the specific processing pipeline, allowing the system to add new processing stages without modifying the core orchestration logic.
+A hybrid queue architecture (authoritative SQLite persistence paired with an in-memory prefetch buffer) eliminates the dual-queue split-brain problem and ensures complete crash durability while delivering sub-millisecond dispatch latency to workers. Resource-weighted concurrency semaphores address a critical real-world failure mode in media transcoding: consumer GPU hardware acceleration limits (such as NVENC concurrent session caps and VRAM ceilings) that inevitably crash or reject encodes when treated as unbounded generic workers. Dimensioning separate GPU and CPU worker semaphores guarantees maximum hardware saturation without risking out-of-memory conditions or hardware driver instability. Simplifying the batch splitter to coordinate multi-phase pipeline waves rather than attempting complex asynchronous per-stream media file chunking avoids massive container demuxing and concatenation complexity without sacrificing throughput.
 
 ---
 
@@ -588,7 +602,7 @@ The GitLab CI/CD pipeline lifecycle follows these phases:
 
 ### Trade-offs and Design Justification
 
-GitLab CI/CD was designed as a parallel alternative to GitHub Actions rather than a replacement, providing platform choice without duplicating all CI/CD logic. The pipeline stage structure mirrors GitHub Actions' workflow job structure, maintaining conceptual consistency across both implementations. GitLab-specific features (runner groups, CI/CD variables, approval gates, packages registry) are leveraged where they provide unique value compared to the GitHub implementation. The approval gate provides a human release checkpoint that is more flexible than GitHub's release draft workflow, allowing conditional approval requirements based on project configuration. Package registry integration provides versioned artifact storage within the GitLab project, eliminating the need for external artifact hosting.
+Module G (GitHub Actions) serves as the primary canonical CI/CD pipeline for open distribution, automated version tagging, draft release publishing, and upstream public release assets. Module H (GitLab CI/CD) is designed as a parallel enterprise mirror for self-hosted environments or internal air-gapped corporate deployments where GitLab runner groups, project approval gates, and integrated package registries are required. The pipeline stage structure mirrors GitHub Actions' workflow job structure, maintaining conceptual consistency across both implementations while allowing teams to maintain a single core codebase across both public GitHub and private GitLab infrastructure.
 
 ---
 
@@ -596,13 +610,15 @@ GitLab CI/CD was designed as a parallel alternative to GitHub Actions rather tha
 
 ### Primary Responsibility
 
-Provide a unified, hierarchical configuration loading mechanism that consolidates settings from multiple sources into a single authoritative configuration store, with validation, hot-reload capability, and centralized access for all modules.
+Provide a unified, hierarchical configuration loading mechanism that consolidates settings from multiple sources into a single authoritative configuration store, with validation, cross-platform path normalization, hot-reload capability, and centralized access for all modules.
 
 ### Design
 
 Each configuration snapshot is immutable once published. Configuration values are loaded in a defined priority order: built-in defaults are applied first, then overridden by environment variables, then by command-line flags, and finally by a configuration file on disk. The last writer wins within each priority layer. Values are validated against a schema defined at startup; invalid values cause a startup failure with a detailed error listing each invalid field and its expected type and constraints. The configuration store is read through a concurrency-safe accessor that returns copies of configuration values.
 
-Hot-reload capability allows specific configuration sections (notification channels, rate limits, scan paths, worker pool sizing) to be reloaded without restarting the application. When a configuration file change is detected on disk, the engine loads the new configuration, validates it, and atomically replaces the active configuration snapshot. Modules that depend on hot-reloadable settings subscribe to configuration change notifications and react to updates (e.g., the concurrency engine adjusts its worker pool size, the notification engine reloads channel adapters). Settings that cannot be hot-reloaded (database connection string, log level during initialization) require a full application restart.
+Cross-platform path normalization is enforced across all configured paths: Windows backslashes are converted to uniform internal separators, extended-length path prefixes (`\\?\`) are applied transparently on Windows to overcome 260-character `MAX_PATH` limitations, and Universal Naming Convention (UNC) paths (`\\server\share`) are validated for network storage targets.
+
+Hot-reload capability allows specific configuration sections (notification channels, rate limits, scan paths, worker pool sizing, GPU session semaphore limits) to be reloaded without restarting the application. When a configuration file change is detected on disk, the engine loads the new configuration, validates it, and atomically replaces the active configuration snapshot. Modules that depend on hot-reloadable settings subscribe to configuration change notifications and react to updates (e.g., the concurrency engine adjusts its worker pool or GPU semaphore limits, the notification engine reloads channel adapters). Settings that cannot be hot-reloaded (database connection string, log level during initialization) require a full application restart.
 
 All modules access configuration through a shared configuration accessor interface that provides typed getters for each configuration parameter. The accessor returns a default value when a configuration key is unset, ensuring that modules never encounter nil or missing configuration. Configuration changes are logged to the audit trail with the changed keys and old/new values.
 
@@ -624,16 +640,16 @@ Structured logging is the primary observational mechanism, with each module emit
 
 Metrics are collected through a centralized metrics registry that exposes counters, gauges, and histograms. Specific metrics collected include:
 
-- Queue depth: current number of pending, processing, and completed queue entries (reported by Module E and persisted by Module A).
-- Worker utilization: percentage of workers actively processing versus idle (reported by Module E).
+- Queue depth: current number of pending, leased, processing, and completed queue entries (reported by Module E and persisted by Module A).
+- Worker and semaphore utilization: percentage of active vs. idle CPU workers, and active vs. available GPU session permits (reported by Module E).
 - Success and failure rates: ratio of successful to failed operations per module per time window (reported by each module).
-- VMAF scores: distribution of quality verification scores for transcoded files (reported by Module D).
-- Scan progress: files discovered, files accepted, files skipped, scan duration (reported by Module B).
+- VMAF scores: distribution of stratified segment VMAF scores and SSIM pre-filter results (reported by Module D).
+- Scan progress: files discovered, files accepted, files skipped, duplicate counts, scan duration (reported by Module B).
 - Evaluation results: decision distribution (transcode, stream copy, skip, flag for review counts) (reported by Module C).
 - Notification delivery: delivery success and failure rates, batch sizes, delivery latency (reported by Module F).
 - Build metrics: build duration, success rates by platform, artifact sizes (reported by Modules G and H).
 
-Metrics are exported in a standard format compatible with Prometheus and are exposed on a local HTTP endpoint for scraping. A health check endpoint reports the overall system health status, including the state of each module (healthy, degraded, unhealthy), queue depth, and active worker count.
+Metrics are exported in a standard format compatible with Prometheus and are exposed on a local HTTP endpoint for scraping. A health check endpoint reports the overall system health status, including the state of each module (healthy, degraded, unhealthy), queue depth, write actor buffer utilization, and active worker count.
 
 The audit trail, implemented by Module A's audit log, captures significant operational events across all modules. Events are appended with structured metadata enabling post-incident investigation and compliance reporting.
 
@@ -643,7 +659,7 @@ The audit trail, implemented by Module A's audit log, captures significant opera
 
 ### Primary Responsibility
 
-Define and enforce a deterministic shutdown sequence that ensures all in-progress work is completed or safely rolled back, persistent state is flushed, and external connections are cleanly terminated before the application exits.
+Define and enforce a deterministic shutdown sequence that ensures all in-progress work is completed or safely rolled back, persistent state is flushed, external connections are cleanly terminated, and child processes are pruned before the application exits.
 
 ### Design
 
@@ -651,11 +667,11 @@ The shutdown sequence is triggered by a signal (SIGTERM on Unix, Ctrl+C or syste
 
 1. Signal Interception: A signal handler intercepts shutdown signals and initiates the shutdown sequence. The handler ignores subsequent signals during the shutdown process to prevent duplicate shutdown attempts. The application logs the shutdown signal and its timestamp.
 
-2. Worker Draining: The concurrency engine enters the drain phase. New task submissions are rejected. Existing workers complete their current assignments. The engine waits for all in-flight operations to complete, up to a configured drain timeout. Operations that exceed the drain timeout are cancelled via their cancellation context, and the affected jobs are requeued or marked as failed.
+2. Worker Draining and Ingestion Halt: The concurrency engine enters the drain phase. The prefetch loop stops, and new task submissions from the filesystem engine are rejected. Existing workers complete their current assignments. The engine waits for all in-flight operations to complete, up to a configured drain timeout. Operations that exceed the drain timeout are canceled via their cancellation context, triggering immediate termination of child processes via the process supervisor.
 
-3. State Persistence: The concurrency engine flushes all pending state changes to the persistence engine. The filesystem engine flushes any pending scan checkpoints. The notification engine flushes pending delivery records. The persistence engine commits all pending transactions synchronously.
+3. State Persistence: The concurrency engine flushes all pending state changes to the persistence engine's write actor channel. The filesystem engine flushes any pending scan checkpoints. The notification engine flushes pending delivery records. The persistence engine's single-writer actor commits all remaining transactions synchronously to SQLite.
 
-4. Connection Teardown: The persistence engine closes all database connections. The notification engine closes all adapter connections. External process handles (ffprobe, ffmpeg, VMAF) are terminated cleanly.
+4. Connection Teardown: The persistence engine closes all read connections and the single write connection. The notification engine closes all adapter connections. External process handles (ffprobe, ffmpeg, VMAF) are terminated cleanly.
 
 5. Final Reporting: The observability subsystem exports final metrics and writes a shutdown summary to the audit log. The application exits with a zero exit code if shutdown completed normally, or a non-zero exit code if a timeout or error prevented clean shutdown.
 
@@ -664,6 +680,28 @@ The shutdown sequence is designed to be idempotent: calling it multiple times (e
 ### Integration
 
 The shutdown coordinator is a central component that all modules register with at startup. Each module registers a shutdown handler that is invoked during the appropriate phase (draining, persistence, teardown). The concurrency engine's drain phase is the longest phase and typically determines the overall shutdown duration. The persistence engine's synchronous commit during state persistence ensures that no queued work is lost on shutdown.
+
+---
+
+## Cross-Cutting Concern: Child Process Supervision and Zombie Prevention
+
+### Primary Responsibility
+
+Supervise and isolate all external CLI child processes (ffmpeg, ffprobe, VMAF verification) across POSIX and Windows operating systems, ensuring immediate process termination and cleanup upon context cancellation, worker timeout, or application termination to prevent orphaned zombie processes from consuming CPU and GPU resources.
+
+### Design
+
+Because MediaCruncher delegates media analysis, transcoding, and quality scoring to external CLI binaries without CGO bindings, child process lifecycle management is a vital stability requirement:
+
+1. Windows Job Objects: On Windows hosts, every external process invocation is assigned upon creation to a Windows Job Object configured with the `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` flag. If the worker context is canceled, the timeout expires, or the parent Go daemon crashes, the Windows kernel guarantees immediate, unconditional termination of the entire child process hierarchy.
+
+2. POSIX Process Groups: On Linux and macOS hosts, processes are launched with `Setpgid: true` to establish their own independent process group. When a context cancellation or timeout occurs, termination signals (`SIGTERM` followed after a brief grace window by `SIGKILL`) are dispatched to the negative process group ID (`-PID`), ensuring intermediate child shells and media sub-processes are completely pruned without leaving orphaned processes.
+
+3. Asynchronous Pipe Draining: Standard output and standard error from child processes are drained continuously using non-blocking goroutines with bounded circular memory buffers. This prevents external CLI tools from hanging indefinitely due to saturated operating system pipe buffers during long transcode runs.
+
+### Integration
+
+Modules C (Evaluation Pipeline) and D (Transcoder) execute all external process invocations through this unified supervisor. Context cancellations generated by Module E's worker lifecycles propagate directly through the supervisor to terminate active transcoding and probing immediately.
 
 ---
 
@@ -693,48 +731,51 @@ This section summarizes the connectivity, data sharing, and communication patter
 
 The system follows a pipeline architecture where data flows from filesystem ingestion through evaluation to transcoding, with the concurrency engine orchestrating the flow and the notification engine providing asynchronous event distribution.
 
-- Module B (Filesystem Engine) is the entry point, discovering media files and pushing them into the processing pipeline.
-- Module E (Concurrency Engine) receives discovered files from Module B and dispatches them to Module C (Evaluation Pipeline) for analysis.
-- Module C (Evaluation Pipeline) analyzes files and produces decisions that are routed back to Module E for further processing.
-- Module E dispatches transcode decisions to Module D (Transcoder) for execution.
-- Module D writes transcoding results back to Module E, which routes completion notifications to Module F (Notification Engine).
-- Module A (Persistence Engine) underlies the entire system, providing durable state for all modules.
-- Modules G (GitHub CI/CD) and H (GitLab CI/CD) operate externally to the runtime pipeline, providing build, test, signing, and release automation.
+- Module B (Filesystem Engine) is the entry point, discovering media files with two-tier deduplication and pushing them into the processing pipeline.
+- Module E (Concurrency Engine) receives discovered files from Module B, stages them in persistent storage via Module A's write actor, prefetches pending jobs into an in-memory buffer, and dispatches them to Module C (Evaluation Pipeline) for analysis.
+- Module C (Evaluation Pipeline) analyzes files, synthesizes multi-stream preservation mappings, and submits decisions to Module A via the write actor.
+- Module E reads evaluation decisions from the prefetch buffer, acquires GPU permits via resource semaphores, and dispatches transcode jobs to Module D (Transcoder).
+- Module D executes transcoding with hardware session limits, verifies quality using stratified segment VMAF sampling, promotes output across filesystem boundaries, and reports results back to Module E and Module A.
+- Module E routes completion notifications to Module F (Notification Engine).
+- Module A (Persistence Engine) underlies the entire system, providing durable state for all modules via concurrent read pools and a Single-Writer Actor.
+- Modules G (GitHub CI/CD) and H (GitLab CI/CD) operate externally to the runtime pipeline, providing canonical release automation and enterprise mirrored distribution respectively.
 
 ### Data Sharing Patterns
 
-- Queue-based communication: Module E maintains the in-memory task queue that serves as the primary data exchange mechanism between the filesystem engine, evaluation pipeline, transcoder, and notification engine. Work items flow through the queue in a producer-consumer pattern.
+- Persistent Queue with Prefetch Dispatch: Module A's SQLite `Queue Entries` table serves as the single authoritative state for all work items. Module E maintains a bounded in-memory prefetch buffer that continuously leases pending work items from Module A, providing sub-millisecond dispatch to workers while eliminating dual-queue split-brain risks.
 
-- Persistence-mediated communication: Modules A, C, D, and F share data through the persistence engine. Module C writes decision records that Module D reads (indirectly through the queue). Module A serves as the audit source for Module F's delivery records.
+- Single-Writer Actor Communication: All write mutations across all modules (queue enqueues, state transitions, metadata upserts, audit log records, delivery acknowledgments) are serialized through Module A's dedicated write actor channel, eliminating `SQLITE_BUSY` database lock contention.
 
-- Configuration-mediated communication: All modules share configuration through the centralized configuration store. Configuration changes propagate from the store to dependent modules through the hot-reload notification mechanism.
+- Resource Semaphore Governance: Module E regulates dispatch of transcode jobs to Module D using dedicated `GPUWorkerSemaphore` and `CPUWorkerSemaphore` tokens, preventing GPU VRAM exhaustion and hardware encoder session rejections.
 
 - Audit-mediated communication: The audit log in Module A serves as a shared event history that can be queried by Module F for notification routing decisions and by external monitoring tools for system diagnostics.
 
 ### Communication Flow Sequence
 
-1. Filesystem discovery (Module B) pushes files to the concurrency engine queue (Module E).
-2. Module E dispatches files to the evaluation pipeline (Module C).
-3. Module C analyzes files and persists decisions to the persistence engine (Module A).
-4. Module E reads evaluation results and routes them: transcode decisions go to the transcoder (Module D); skip decisions are marked complete; flag-for-review decisions trigger notification events (Module F).
-5. Module D executes transcoding, verifies quality, and reports results to Module E.
-6. Module E routes transcoding results: success triggers notification events; failure triggers retry or review notifications.
-7. Module F delivers notifications to external channels based on event type and severity.
-8. All modules log operational events to the persistence engine's audit log for accountability and debugging.
-9. CI/CD pipelines (Modules G and H) build, test, sign, and release the application independently of the runtime pipeline.
+1. Filesystem discovery (Module B) identifies media files using size-first boundary hashing and pushes records to the concurrency engine (Module E).
+2. Module E persists new jobs to Module A via the single-writer actor channel.
+3. The prefetch loop in Module E leases pending evaluation jobs and dispatches them to the evaluation pipeline (Module C).
+4. Module C analyzes files, generates per-stream audio/subtitle preservation mapping directives, and submits decision records to Module A's write actor.
+5. Module E prefetches transcode jobs, acquires a GPU session permit from the GPU semaphore (or selects CPU fallback), and dispatches work to the transcoder (Module D).
+6. Module D executes ffmpeg transcoding in an isolated staging folder under child process supervision, runs stratified segment VMAF quality verification, releases the GPU semaphore permit, promotes output to the destination via atomic move or cross-device copy (`EXDEV`), and updates job state via Module A's write actor.
+7. Module E routes transcoding results: success triggers notification events; failure triggers retry backoff or review notifications.
+8. Module F delivers batched and rate-limited notifications to external channels (Telegram, Discord, Slack, etc.).
+9. All modules log significant operational events to Module A's audit log.
+10. CI/CD pipelines (Modules G and H) build, test, sign, and release the application independently of the runtime pipeline.
 
 ### Dependency Graph
 
 - Module A is depended on by: B, C, D, E, F
 - Module B is depended on by: E
-- Module C is depended on by: E, D (indirect via queue)
+- Module C is depended on by: E, D (indirect via stream mapping contracts)
 - Module D is depended on by: E
 - Module E is depended on by: B, C, D, F
 - Module F is depended on by: E
-- Module G is independent (external CI/CD)
-- Module H is independent (external CI/CD)
+- Module G is independent (canonical external CI/CD)
+- Module H is independent (mirrored external CI/CD)
+- Child Process Supervision is depended on by: C, D
 - Configuration Management is depended on by: all modules (A through H)
 - Observability is depended on by: all modules (A through F)
-- Graceful Shutdown coordinates: E, A, F
+- Graceful Shutdown coordinates: E, A, F, and Child Process Supervision
 - Stateless Worker Design applies to: E, C, D
 

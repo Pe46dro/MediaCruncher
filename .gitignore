@@ -1,0 +1,24 @@
+# Binaries and executables
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test and development databases
+*.db
+*.db-wal
+*.db-shm
+mediacruncher.db
+
+# Staging and temp files
+staging/
+*.media_cruncher_tmp
+*.media_cruncher_backup
+test_media/
+
+# Test coverage
+coverage.out
+*.cov
