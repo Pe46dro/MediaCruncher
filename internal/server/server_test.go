@@ -8,7 +8,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"mediacruncher/internal/config"
 	"mediacruncher/internal/observability"
@@ -36,9 +38,9 @@ func TestServerEndpoints(t *testing.T) {
 	}
 
 	metrics := observability.NewMetrics()
-	scanned := false
+	var scanned atomic.Bool
 	s := NewServer(0, cfgMgr, db, metrics, func() {
-		scanned = true
+		scanned.Store(true)
 	})
 
 	handler := s.httpServer.Handler
@@ -121,8 +123,13 @@ func TestServerEndpoints(t *testing.T) {
 	if wScan.Code != http.StatusAccepted {
 		t.Fatalf("expected 202 for /api/scan, got %d", wScan.Code)
 	}
-	if !scanned {
-		// Wait brief moment for goroutine
+	// Wait brief moment for background goroutine to execute
+	deadline := time.Now().Add(1 * time.Second)
+	for !scanned.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !scanned.Load() {
+		t.Errorf("expected scanned callback to be invoked")
 	}
 
 	_ = s.Shutdown(context.Background())
