@@ -1,0 +1,191 @@
+name: CI - Build, Test, Sign, Release
+
+on:
+  push:
+    branches: [main, develop, 'release/**', 'feat/**', 'fix/**']
+  release:
+    types: [published]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: '1.25'
+  ARTIFACT_RETENTION_DAYS: 30
+  SIGNING_ALGORITHM: ecdsa-sha2-nistp256
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  matrix:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        arch: [amd64, arm64]
+        exclude:
+          - os: windows-latest
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Build binary
+        id: build
+        shell: pwsh
+        env:
+          GOOS: ${{ runner.os == 'macOS' && 'darwin' || (runner.os == 'Windows' && 'windows' || 'linux') }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          $buildDir = "dist"
+          if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }
+
+          $commitHash = if (Test-Path .git) { (git rev-parse --short HEAD) } else { "unknown" }
+          $buildTime = (Get-Date -Format "yyyyMMdd-HHmmss")
+          $version = "dev"
+
+          $ldflags = "-X mediacruncher/internal/observability.BuildVersion=$version -X mediacruncher/internal/observability.BuildCommit=$commitHash -X mediacruncher/internal/observability.BuildTime=$buildTime"
+
+          $binaryName = if ($env:GOOS -eq "windows") { "mediacruncher.exe" } else { "mediacruncher" }
+          $outputPath = Join-Path $buildDir $binaryName
+
+          go build -ldflags="$ldflags" -o $outputPath ./cmd/main.go
+
+          echo "binary=$outputPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          $buildDir = "dist"
+          $binaryPath = if (Test-Path dist/mediacruncher.exe) { "dist/mediacruncher.exe" } else { "dist/mediacruncher" }
+          $binaryName = Split-Path $binaryPath -Leaf
+          $hash = (Get-FileHash -Path $binaryPath -Algorithm SHA256).Hash.ToString().ToLower()
+          $checksumFile = "$binaryPath.sha256"
+          "$hash  $binaryName" | Out-File -FilePath $checksumFile -Encoding utf8
+          echo "checksum=$checksumFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mediacruncher-${{ runner.os == 'macOS' && 'Darwin' || (runner.os == 'Windows' && 'Windows' || 'Linux') }}-${{ matrix.arch }}
+          path: |
+            dist/mediacruncher*
+            dist/mediacruncher.exe
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  verify:
+    name: Verify Artifacts
+    needs: matrix
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: |
+          Get-ChildItem -Recurse artifacts | ForEach-Object { Write-Host $_.FullName }
+        shell: pwsh
+
+  sign:
+    name: Sign Artifacts
+    needs: matrix
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: artifacts
+
+      - name: Setup signing key
+        run: |
+          mkdir -p .signing
+          if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "${{ secrets.SIGNING_KEY }}" | base64 -d > .signing/signing_key.pem
+            chmod 600 .signing/signing_key.pem
+          fi
+        shell: bash
+
+      - name: Sign binaries
+        run: |
+          if [ -f .signing/signing_key.pem ] && [ -s .signing/signing_key.pem ]; then
+            for dir in artifacts/*/; do
+              binary=$(find "$dir" -maxdepth 1 -type f -name "mediacruncher*" ! -name "*.sha256" ! -name "*.sig" | head -1)
+              if [ -n "$binary" ]; then
+                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
+              fi
+            done
+          else
+            echo "Warning: SIGNING_KEY not provided or empty, skipping signature"
+          fi
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: signed-artifacts
+          path: artifacts/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  release:
+    name: Publish Release
+    needs: sign
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v6
+        with:
+          name: signed-artifacts
+          path: release-artifacts
+
+      - name: Generate release notes
+        id: notes
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data: commits } = await github.rest.repos.listCommits({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 50,
+            });
+            let body = '## Release Notes\n\n';
+            commits.forEach(commit => {
+              body += `- ${commit.commit.message.split('\n')[0]}\n`;
+            });
+            body += '\n## Signature Verification\n\n' +
+                    'Each binary has a detached ECDSA signature file (`.sha256` and `.sig`).\n' +
+                    'Verify with: `openssl dgst -sha256 -verify <(echo "<public-key>") -signature mediacruncher.sig mediacruncher`\n';
+            core.setOutput('body', body);
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: release-artifacts/**/*
+          body: ${{ steps.notes.outputs.body }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -336,6 +336,33 @@ func (e *Engine) RecoverOrphanedLeases() (int64, error) {
 	return e.CrashRecovery()
 }
 
+// ResetInFlightJobs resets all jobs in leased/evaluating/transcoding states back to pending.
+// Called on startup to ensure work interrupted by an unexpected restart resumes immediately.
+func (e *Engine) ResetInFlightJobs() (int64, error) {
+	res, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		now := time.Now().UTC()
+		query := `
+		UPDATE queue_entries 
+		SET state = ?, worker_id = NULL, leased_at = NULL, lease_expires_at = NULL
+		WHERE state = ? OR state = ? OR state = ? OR state = ?
+		`
+		result, err := tx.Exec(query, StatePending, StateLeased, StateProcessing, StateEvaluating, StateTranscoding)
+		if err != nil {
+			return int64(0), err
+		}
+		recovered, err := result.RowsAffected()
+		if recovered > 0 {
+			auditQuery := `INSERT INTO audit_logs (timestamp, event_type, severity, payload_json) VALUES (?, ?, ?, ?)`
+			tx.Exec(auditQuery, now, "startup_recovery", "info", fmt.Sprintf(`{"recovered_jobs": %d}`, recovered))
+		}
+		return recovered, err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.(int64), nil
+}
+
 type QueueStats struct {
 	Pending   int64 `json:"pending"`
 	Leased    int64 `json:"leased"`
@@ -459,4 +486,77 @@ func (e *Engine) Close() error {
 // ReadDB exposes the read connection pool for metrics and test queries.
 func (e *Engine) ReadDB() *sql.DB {
 	return e.readDB
+}
+
+// ListQueueEntries returns paged queue items with optional state filter.
+func (e *Engine) ListQueueEntries(state string, limit, offset int) ([]*QueueEntry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var rows *sql.Rows
+	var err error
+	if state != "" && state != "all" {
+		if state == "failed" {
+			query := `SELECT id, file_path, state, worker_id, priority, retry_count, created_at, scheduled_at, error_message FROM queue_entries WHERE state IN ('failed', 'quality_failed', 'permanently_failed') ORDER BY id DESC LIMIT ? OFFSET ?`
+			rows, err = e.readDB.Query(query, limit, offset)
+		} else {
+			query := `SELECT id, file_path, state, worker_id, priority, retry_count, created_at, scheduled_at, error_message FROM queue_entries WHERE state = ? ORDER BY id DESC LIMIT ? OFFSET ?`
+			rows, err = e.readDB.Query(query, state, limit, offset)
+		}
+	} else {
+		query := `SELECT id, file_path, state, worker_id, priority, retry_count, created_at, scheduled_at, error_message FROM queue_entries ORDER BY id DESC LIMIT ? OFFSET ?`
+		rows, err = e.readDB.Query(query, limit, offset)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var entries []*QueueEntry
+	for rows.Next() {
+		var item QueueEntry
+		var workerID, errMsg sql.NullString
+		if err := rows.Scan(&item.ID, &item.FilePath, &item.State, &workerID, &item.Priority, &item.RetryCount, &item.CreatedAt, &item.ScheduledAt, &errMsg); err != nil {
+			return nil, err
+		}
+		if workerID.Valid {
+			item.WorkerID = workerID.String
+		}
+		if errMsg.Valid {
+			item.ErrorMessage = errMsg.String
+		}
+		entries = append(entries, &item)
+	}
+	return entries, nil
+}
+
+// RequeueJob resets an existing job to pending status for re-execution.
+func (e *Engine) RequeueJob(id int64) error {
+	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		query := `
+		UPDATE queue_entries 
+		SET state = ?, retry_count = 0, scheduled_at = ?, error_message = NULL, worker_id = NULL, leased_at = NULL, lease_expires_at = NULL
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query, StatePending, time.Now().UTC(), id)
+		return nil, err
+	})
+	return err
+}
+
+// DeleteJob permanently removes a job from the queue.
+func (e *Engine) DeleteJob(id int64) error {
+	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		query := `DELETE FROM queue_entries WHERE id = ?`
+		_, err := tx.Exec(query, id)
+		return nil, err
+	})
+	return err
 }

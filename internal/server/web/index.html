@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MediaCruncher Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- Top Navigation Bar -->
+  <header class="navbar">
+    <div class="brand">
+      <div class="brand-icon">
+        <svg viewBox="0 0 24 24"><path d="M4 6H2v14c0 1.1.9 2 2 2h14v-2H4V6zm16-4H8c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-8 12.5v-9l6 4.5-6 4.5z"/></svg>
+      </div>
+      <div>
+        <span class="brand-name">MediaCruncher</span>
+        <span class="brand-badge">Zero-CGO</span>
+      </div>
+    </div>
+
+    <div class="header-status">
+      <div class="live-indicator">
+        <div class="pulse-dot"></div>
+        <span id="daemon-status-text">Daemon Active</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-trigger-scan" class="btn btn-secondary btn-sm" title="Scan filesystem immediately">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          Scan Now
+        </button>
+        <button id="btn-toggle-refresh" class="btn btn-secondary btn-sm" title="Toggle 3s live polling">
+          Auto-Refresh: ON
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Tabs -->
+  <nav class="tabs-bar">
+    <button class="tab-btn active" data-tab="tab-dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9"></rect><rect x="14" y="3" width="7" height="5"></rect><rect x="14" y="12" width="7" height="9"></rect><rect x="3" y="16" width="7" height="5"></rect></svg>
+      Dashboard & Telemetry
+    </button>
+    <button class="tab-btn" data-tab="tab-queue">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
+      Job Queue (<span id="queue-badge-count">0</span>)
+    </button>
+    <button class="tab-btn" data-tab="tab-rules">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+      Rules & Evaluation
+    </button>
+    <button class="tab-btn" data-tab="tab-presets">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+      Encoding Presets
+    </button>
+    <button class="tab-btn" data-tab="tab-settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+      Full Configuration
+    </button>
+  </nav>
+
+  <!-- Main Content Area -->
+  <main class="main-content">
+
+    <!-- ==================== TAB 1: DASHBOARD & STATS ==================== -->
+    <section id="tab-dashboard" class="tab-pane active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-title">Files Discovered</span>
+            <div class="stat-icon primary">📁</div>
+          </div>
+          <div class="stat-value" id="stat-scanned">0</div>
+          <div class="stat-footer">Deduplicated: <span id="stat-deduped">0</span></div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-title">Jobs Completed</span>
+            <div class="stat-icon emerald">✓</div>
+          </div>
+          <div class="stat-value" id="stat-completed">0</div>
+          <div class="stat-footer">Failed: <span id="stat-failed">0</span></div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-title">Storage Saved</span>
+            <div class="stat-icon cyan">💾</div>
+          </div>
+          <div class="stat-value" id="stat-saved">0 B</div>
+          <div class="stat-footer">Net reduction achieved</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-title">Average VMAF</span>
+            <div class="stat-icon purple">🎯</div>
+          </div>
+          <div class="stat-value" id="stat-vmaf">--</div>
+          <div class="stat-footer">Visual fidelity score</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-title">Active Workers</span>
+            <div class="stat-icon amber">⚡</div>
+          </div>
+          <div class="stat-value" style="font-size:1.45rem;">
+            <span id="stat-gpu-active">0</span><span class="stat-limit" id="stat-gpu-limit">/2</span> <span style="font-size:0.9rem; color:var(--text-secondary);">GPU</span> &bull; 
+            <span id="stat-cpu-active">0</span><span class="stat-limit" id="stat-cpu-limit">/4</span> <span style="font-size:0.9rem; color:var(--text-secondary);">CPU</span>
+          </div>
+          <div class="stat-footer">Dual semaphore-governed</div>
+        </div>
+      </div>
+
+      <!-- Live Visual Dashboard Charts -->
+      <div class="dashboard-row">
+        <div class="card">
+          <div class="card-title">
+            <span>Recent Storage Savings</span>
+            <span id="savings-subtitle" style="font-size:0.75rem; color:var(--text-muted);">Bytes saved per transcode</span>
+          </div>
+          <div class="chart-container" id="savings-chart" style="display:flex; flex-direction:column; gap:0.5rem; min-height:220px;">
+            <svg id="svg-savings" width="100%" height="150" style="overflow:visible;"></svg>
+            <div id="savings-list" class="savings-feed"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>Queue Breakdown</span>
+            <span id="queue-breakdown-total" style="font-size:0.75rem; color:var(--text-muted);">0 total</span>
+          </div>
+          <div class="chart-container" style="display:flex; align-items:center; justify-content:center;">
+            <svg id="svg-donut" width="180" height="180" viewBox="0 0 180 180"></svg>
+          </div>
+        </div>
+      </div>
+
+      <!-- Subsystem Health & Real-time Audit Logs -->
+      <div class="dashboard-row">
+        <div class="card">
+          <div class="card-title">Subsystem Architecture Health</div>
+          <div class="health-grid" id="health-grid">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title">
+            <span>Recent Operational Audit Feed</span>
+            <span style="font-size:0.75rem; color:var(--text-muted);">Auto-refreshing</span>
+          </div>
+          <div id="audit-feed" class="audit-feed">
+            <!-- Populated dynamically -->
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 2: LIVE JOB QUEUE ==================== -->
+    <section id="tab-queue" class="tab-pane">
+      <div class="table-controls">
+        <div class="filters-group" id="queue-filters">
+          <button class="filter-pill active" data-state="all">All</button>
+          <button class="filter-pill" data-state="pending">Pending</button>
+          <button class="filter-pill" data-state="evaluating">Evaluating</button>
+          <button class="filter-pill" data-state="transcoding">Transcoding</button>
+          <button class="filter-pill" data-state="completed">Completed</button>
+          <button class="filter-pill" data-state="skipped">Skipped</button>
+          <button class="filter-pill" data-state="failed">Failed</button>
+        </div>
+        <div style="display:flex; gap:0.75rem; align-items:center;">
+          <input type="text" id="queue-search" class="search-input" placeholder="Search files in queue...">
+          <button id="btn-refresh-queue" class="btn btn-secondary btn-sm">Refresh</button>
+        </div>
+      </div>
+
+      <div class="table-wrapper">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>File Name</th>
+              <th>Status</th>
+              <th>Transcode Result</th>
+              <th>Priority</th>
+              <th>Retries</th>
+              <th>Scheduled</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="queue-table-body">
+            <tr><td colspan="8" style="text-align:center; padding:2rem;">Loading queue entries...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 3: RULES & EVALUATION ==================== -->
+    <section id="tab-rules" class="tab-pane">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+        <div>
+          <h2 style="font-size:1.25rem; font-weight:700;">Evaluation Rule Engine</h2>
+          <p style="font-size:0.85rem; color:var(--text-secondary);">Prioritized decision rules evaluated against ffprobe metadata. First matching rule wins.</p>
+        </div>
+        <button id="btn-add-rule" class="btn btn-primary">+ Add New Rule</button>
+      </div>
+
+      <div class="table-wrapper" style="margin-bottom:2rem;">
+        <table>
+          <thead>
+            <tr>
+              <th>Priority</th>
+              <th>Rule Name</th>
+              <th>Conditions</th>
+              <th>Action</th>
+              <th>Preset</th>
+              <th>Audio Action</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="rules-table-body">
+            <!-- Populated dynamically -->
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Audio & Subtitle Preservation Directives</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">
+              <input type="checkbox" id="pres-surround"> Retain Surround Tracks (5.1 / 7.1 Atmos & DTS)
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              <input type="checkbox" id="pres-lossless"> Copy Lossless Audio (TrueHD, DTS-HD MA, FLAC)
+            </label>
+          </div>
+          <div class="form-group" style="grid-column: 1 / -1;">
+            <label class="form-label">Preferred Audio Languages (comma-separated ISO-639 codes)</label>
+            <input type="text" id="pres-languages" class="form-control" placeholder="eng, ita, und">
+          </div>
+        </div>
+        <button id="btn-save-preservation" class="btn btn-primary">Save Preservation Settings</button>
+      </div>
+    </section>
+
+    <!-- ==================== TAB 4: ENCODING PRESETS ==================== -->
+    <section id="tab-presets" class="tab-pane">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1.5rem;">
+        <div>
+          <h2 style="font-size:1.25rem; font-weight:700;">Encoding Presets</h2>
+          <p style="font-size:0.85rem; color:var(--text-secondary);">Target codecs, quality factor (CRF), encoder speeds, and audio dispositions.</p>
+        </div>
+        <button id="btn-add-preset" class="btn btn-primary">+ Add Preset</button>
+      </div>
+
+      <div class="stats-grid" id="presets-grid">
+        <!-- Populated dynamically -->
+      </div>
+    </section>
+
+    <!-- ==================== TAB 5: FULL CONFIGURATION ==================== -->
+    <section id="tab-settings" class="tab-pane">
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">System & Resource Concurrency</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Total Worker Threads</label>
+            <input type="number" id="cfg-workers" class="form-control" min="1" max="32">
+          </div>
+          <div class="form-group">
+            <label class="form-label">GPU Semaphore Limit (Max Concurrent NVENC/QSV)</label>
+            <input type="number" id="cfg-gpu-limit" class="form-control" min="1" max="8">
+          </div>
+          <div class="form-group">
+            <label class="form-label">CPU Semaphore Limit</label>
+            <input type="number" id="cfg-cpu-limit" class="form-control" min="1" max="32">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Prefetch Buffer Depth</label>
+            <input type="number" id="cfg-prefetch-depth" class="form-control" min="10" max="500">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Drain Timeout</label>
+            <input type="text" id="cfg-drain-timeout" class="form-control" placeholder="5m">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max Retry Attempts</label>
+            <input type="number" id="cfg-max-retries" class="form-control" min="0" max="10">
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Transcoder & Hardware Acceleration</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Hardware Acceleration</label>
+            <select id="cfg-hwaccel" class="form-control">
+              <option value="auto">Auto-Detect Optimal (Recommended)</option>
+              <option value="nvenc">NVIDIA NVENC</option>
+              <option value="qsv">Intel QuickSync (QSV)</option>
+              <option value="amf">AMD AMF</option>
+              <option value="vaapi">Linux VAAPI</option>
+              <option value="cpu">Software Encoding Only (CPU)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Staging Directory</label>
+            <input type="text" id="cfg-staging-dir" class="form-control">
+          </div>
+          <div class="form-group">
+            <label class="form-label">VMAF Threshold Score</label>
+            <input type="number" id="cfg-vmaf-thresh" class="form-control" step="0.5" min="70" max="100">
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              <input type="checkbox" id="cfg-skip-larger"> Skip & Abort if Output Larger than Source
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              <input type="checkbox" id="cfg-overwrite-source" checked> Overwrite Original Source In-Place
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Output Filename Suffix (when not overwriting)</label>
+            <input type="text" id="cfg-output-suffix" class="form-control" placeholder="_crunched">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Custom Output Directory (empty = same as source)</label>
+            <input type="text" id="cfg-output-dir" class="form-control" placeholder="/media/converted">
+          </div>
+        </div>
+        <div id="hw-capabilities-box" style="margin-top:1rem; padding:1rem; background:rgba(0,0,0,0.3); border-radius:var(--radius-sm); font-size:0.8rem;">
+          Detecting hardware capability profile...
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Filesystem Scopes (JSON format)</div>
+        <div class="form-group">
+          <textarea id="cfg-scopes-json" class="form-control" style="font-family:monospace; min-height:140px;"></textarea>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:1rem;">
+        <button id="btn-save-all-config" class="btn btn-primary" style="padding:0.75rem 2rem;">Save & Apply Configuration</button>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ==================== MODALS ==================== -->
+
+  <!-- Job Details Modal -->
+  <div id="modal-job" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 style="font-size:1.1rem; font-weight:700;" id="modal-job-title">Job Details</h3>
+        <button class="btn btn-secondary btn-sm modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="modal-job-content">Loading...</div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Rule Edit Modal -->
+  <div id="modal-rule" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 style="font-size:1.1rem; font-weight:700;" id="modal-rule-title">Configure Rule</h3>
+        <button class="btn btn-secondary btn-sm modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Rule Name</label>
+            <input type="text" id="rule-name" class="form-control" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Priority (Higher runs first)</label>
+            <input type="number" id="rule-priority" class="form-control" value="50">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Action</label>
+            <select id="rule-action" class="form-control">
+              <option value="transcode">Transcode</option>
+              <option value="copy">Direct Copy</option>
+              <option value="skip">Skip</option>
+              <option value="review">Flag for Review</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Preset Name</label>
+            <input type="text" id="rule-preset" class="form-control" value="balanced-hevc">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Match Codecs (comma-separated)</label>
+            <input type="text" id="rule-cond-codec" class="form-control" placeholder="h264, mpeg4">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Match Resolution</label>
+            <input type="text" id="rule-cond-res" class="form-control" placeholder="1080p, 4k">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button id="btn-save-rule-dialog" class="btn btn-primary">Save Rule</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Preset Edit Modal -->
+  <div id="modal-preset" class="modal-backdrop">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 style="font-size:1.1rem; font-weight:700;" id="modal-preset-title">Configure Preset</h3>
+        <button class="btn btn-secondary btn-sm modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Preset Name</label>
+            <input type="text" id="preset-name" class="form-control" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Video Codec</label>
+            <select id="preset-codec" class="form-control">
+              <option value="hevc">HEVC / H.265</option>
+              <option value="av1">AV1</option>
+              <option value="h264">H.264 / AVC</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Quality CRF (0-51)</label>
+            <input type="number" id="preset-crf" class="form-control" value="22" min="0" max="51">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Preset Speed</label>
+            <input type="text" id="preset-speed" class="form-control" value="medium" placeholder="medium, slow, p5, preset=6">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Audio Codec</label>
+            <input type="text" id="preset-audio-codec" class="form-control" value="copy">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Extra FFmpeg Flags</label>
+            <input type="text" id="preset-extra" class="form-control" placeholder="-tune grain">
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Cancel</button>
+        <button id="btn-save-preset-dialog" class="btn btn-primary">Save Preset</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -15,6 +15,8 @@ mediacruncher.db
 
 # Staging and temp files
 staging/
+media/
+
 *.media_cruncher_tmp
 *.media_cruncher_backup
 test_media/

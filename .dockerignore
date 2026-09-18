@@ -1,0 +1,10 @@
+.git
+.github
+data/
+staging/
+media/
+bin/
+*.exe
+*.log
+*.tmp
+node_modules/

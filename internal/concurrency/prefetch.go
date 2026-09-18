@@ -57,7 +57,7 @@ func (p *Prefetcher) Trigger() {
 // Start begins background prefetch polling and lease recovery.
 func (p *Prefetcher) Start(ctx context.Context) {
 	// Immediate initial orphan recovery on boot
-	_, _ = p.db.RecoverOrphanedLeases()
+	_, _ = p.db.ResetInFlightJobs()
 
 	p.wg.Add(1)
 	go p.loop(ctx)

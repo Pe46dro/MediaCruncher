@@ -60,6 +60,7 @@ type TranscodeResult struct {
 	Verified           bool    `json:"verified"`
 	VerificationReason string  `json:"verification_reason"`
 	SkippedSizeGrowth  bool    `json:"skipped_size_growth"`
+	FailedQualityCheck bool    `json:"failed_quality_check"`
 }
 
 type Transcoder struct {
@@ -78,6 +79,11 @@ func NewTranscoder(cfg config.TranscoderConfig, onProgress func(TranscodeProgres
 		hwProfile:  hw,
 		onProgress: onProgress,
 	}
+}
+
+// GetConfig returns the current transcoder configuration.
+func (t *Transcoder) GetConfig() config.TranscoderConfig {
+	return t.cfg
 }
 
 // SelectPreset returns the configured preset by name, or a default fallback.
@@ -279,7 +285,8 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 				SSIMScore:          ssimScore,
 				Verified:           false,
 				VerificationReason: reason,
-			}, fmt.Errorf("quality verification failed: %s", reason)
+				FailedQualityCheck: true,
+			}, nil
 		}
 	}
 

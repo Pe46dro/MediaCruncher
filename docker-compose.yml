@@ -1,0 +1,53 @@
+services:
+  mediacruncher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mediacruncher:latest
+    container_name: mediacruncher
+    restart: unless-stopped
+
+    # Ports for Prometheus metrics and health check endpoint
+    ports:
+      - "9090:9090"
+
+    # Environment variables overrides
+    environment:
+      - TZ=Europe/Rome
+      - MEDIACRUNCHER_LOG_LEVEL=info
+      - MEDIACRUNCHER_DB_PATH=/var/lib/mediacruncher/mediacruncher.db
+      - MEDIACRUNCHER_METRICS_PORT=9090
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      # - MEDIACRUNCHER_HWACCEL=auto # auto, nvenc, qsv, amf, vaapi, cpu
+
+    # Mounted volumes
+    volumes:
+      # Configuration file
+      - ./config/config.docker.yaml:/etc/mediacruncher/config.yaml:ro
+
+      # Persistent SQLite database and audit logs
+      - ./data:/var/lib/mediacruncher:rw
+
+      # Temporary staging area for active transcodes
+      - ./staging:/tmp/mediacruncher/staging:rw
+
+      # Media library to scan and transcode (adjust host path to your media directory)
+      - ./media:/media:rw
+
+    # Health check monitoring
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9090/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # Hardware Acceleration Configurations (NVIDIA, Intel QSV, AMD VAAPI)
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]

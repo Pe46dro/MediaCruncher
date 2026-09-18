@@ -2,10 +2,17 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, develop, 'release/**', 'feat/**', 'fix/**' ]
     tags: [ 'v*' ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, develop ]
+
+env:
+  GO_VERSION: '1.25'
+
+permissions:
+  contents: write
+  packages: write
 
 jobs:
   validate:
@@ -18,8 +25,10 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: ${{ env.GO_VERSION }}
           check-latest: true
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Go Vet
         run: go vet ./...
@@ -44,7 +53,9 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
 
       - name: Run Tests with Race Detector
         run: go test -v -race -coverprofile=coverage.out ./...
@@ -60,6 +71,7 @@ jobs:
     needs: [validate, test]
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: linux
@@ -84,7 +96,23 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Extract Build Metadata
+        id: meta
+        shell: bash
+        run: |
+          COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+          TIME=$(date -u +%Y%m%d-%H%M%S)
+          VERSION="${{ github.ref_name }}"
+          if [[ -z "$VERSION" || "$VERSION" == "main" || "$VERSION" == "master" ]]; then
+            VERSION="dev"
+          fi
+          echo "commit=$COMMIT" >> $GITHUB_OUTPUT
+          echo "time=$TIME" >> $GITHUB_OUTPUT
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Build Binary (Pure Go Zero-CGO)
         env:
@@ -93,7 +121,8 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o dist/${{ matrix.binary }} ./cmd/mediacruncher
+          LDFLAGS="-s -w -X main.Version=${{ steps.meta.outputs.version }} -X mediacruncher/internal/observability.BuildVersion=${{ steps.meta.outputs.version }} -X mediacruncher/internal/observability.BuildCommit=${{ steps.meta.outputs.commit }} -X mediacruncher/internal/observability.BuildTime=${{ steps.meta.outputs.time }}"
+          go build -trimpath -ldflags="$LDFLAGS" -o dist/${{ matrix.binary }} ./cmd/mediacruncher
 
       - name: Generate Checksum
         working-directory: dist
@@ -121,10 +150,43 @@ jobs:
         with:
           path: release-assets
 
+      - name: Sign Binaries (Optional)
+        shell: bash
+        run: |
+          mkdir -p .signing
+          if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "${{ secrets.SIGNING_KEY }}" | base64 -d > .signing/signing_key.pem
+            chmod 600 .signing/signing_key.pem
+            for dir in release-assets/*/; do
+              binary=$(find "$dir" -maxdepth 1 -type f \( -name "mediacruncher-*" \) ! -name "*.sha256" ! -name "*.sig")
+              if [ -n "$binary" ]; then
+                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
+                echo "Signed: $binary"
+              fi
+            done
+          else
+            echo "Notice: SIGNING_KEY secret not present or empty; skipping binary signature."
+          fi
+
+      - name: Create Combined Checksums
+        shell: bash
+        run: |
+          > release-assets/checksums.txt
+          for dir in release-assets/*/; do
+            for file in "$dir"mediacruncher-*; do
+              if [ -f "$file" ] && [[ "$file" != *.sha256 ]] && [[ "$file" != *.sig ]]; then
+                (cd "$dir" && sha256sum "$(basename "$file")") >> release-assets/checksums.txt
+              fi
+            done
+          done
+          cat release-assets/checksums.txt
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-assets/**/*
+          files: |
+            release-assets/**/*
+            release-assets/checksums.txt
           draft: false
           prerelease: false
           generate_release_notes: true

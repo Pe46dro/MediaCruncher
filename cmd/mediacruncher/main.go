@@ -18,11 +18,12 @@ import (
 	"mediacruncher/internal/notification"
 	"mediacruncher/internal/observability"
 	"mediacruncher/internal/persistence"
+	"mediacruncher/internal/server"
 	"mediacruncher/internal/shutdown"
 	"mediacruncher/internal/transcoder"
 )
 
-const Version = "1.0.0"
+var Version = "1.0.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -105,8 +106,6 @@ func runDaemon(args []string) {
 	observability.InitLogger(cfg.Observability.LogLevel, cfg.Observability.LogJSON)
 	slog.Info("Starting MediaCruncher Daemon", "version", Version)
 
-	metricsServer := observability.StartHTTPServer(cfg.Observability.MetricsPort, observability.GetMetrics())
-
 	// 2. Persistence
 	db, err := persistence.NewEngine(cfg.Database.Path, cfg.Database.BusyTimeout)
 	if err != nil {
@@ -176,7 +175,22 @@ func runDaemon(args []string) {
 		}
 	}()
 
-	// 7. Graceful Shutdown Coordinator
+	// 7. Web UI & REST API Dashboard Server
+	webServer := server.NewServer(
+		cfg.Observability.MetricsPort,
+		cfgMgr,
+		db,
+		observability.GetMetrics(),
+		func() {
+			slog.Info("Triggering manual filesystem scan via Web UI")
+			scanCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			_, _ = scanner.ScanScopes(scanCtx)
+		},
+	)
+	webServer.Start()
+
+	// 8. Graceful Shutdown Coordinator
 	coord := shutdown.NewCoordinator(cfg.Concurrency.DrainTimeout)
 
 	coord.OnDrainWorkers(func(ctx context.Context) error {
@@ -193,7 +207,7 @@ func runDaemon(args []string) {
 	})
 
 	coord.OnTeardown(func(ctx context.Context) error {
-		_ = observability.StopHTTPServer(metricsServer, 5*time.Second)
+		_ = webServer.Shutdown(ctx)
 		return db.Close()
 	})
 

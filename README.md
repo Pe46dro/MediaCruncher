@@ -27,7 +27,7 @@ MediaCruncher is a production-grade, pure Go distributed media transcoding engin
 - Go 1.22+
 - FFmpeg 6.0+ and FFprobe in system `PATH`
 
-### Installation
+### Local Installation
 ```bash
 # Clone and build
 git clone https://github.com/your-org/mediacruncher.git
@@ -36,6 +36,28 @@ cd mediacruncher
 # Build binary
 go build -o bin/mediacruncher ./cmd/mediacruncher
 ```
+
+### Docker & Docker Compose Deployment
+MediaCruncher provides a multi-stage Docker build and a ready-to-run `docker-compose.yml` with pre-configured volume mounts:
+
+```bash
+# Start MediaCruncher daemon in background
+docker compose up -d
+
+# View real-time logs
+docker compose logs -f
+
+# Check health and status
+docker compose ps
+```
+
+#### Mounted Volumes
+| Host Path | Container Path | Purpose |
+|---|---|---|
+| `./config/config.docker.yaml` | `/etc/mediacruncher/config.yaml:ro` | Read-only configuration |
+| `./data` | `/var/lib/mediacruncher:rw` | SQLite database & audit state |
+| `./staging` | `/tmp/mediacruncher/staging:rw` | Fast staging area for active encodes |
+| `./media` | `/media:rw` | Media library to scan and transcode |
 
 ---
 

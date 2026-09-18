@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -223,8 +225,27 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 
 	preset := wp.tc.SelectPreset(record.Decision.Preset)
 
-	// In-place transcode destination (will be promoted atomically)
+	// Determine destination path based on overwrite configuration
+	tcCfg := wp.tc.GetConfig()
 	destPath := entry.FilePath
+	overwrite := true
+	if tcCfg.OverwriteSource != nil {
+		overwrite = *tcCfg.OverwriteSource
+	}
+
+	if !overwrite {
+		dir := filepath.Dir(entry.FilePath)
+		if tcCfg.OutputDir != "" {
+			dir = tcCfg.OutputDir
+		}
+		ext := filepath.Ext(entry.FilePath)
+		base := strings.TrimSuffix(filepath.Base(entry.FilePath), ext)
+		suffix := tcCfg.OutputSuffix
+		if suffix == "" {
+			suffix = "_transcoded"
+		}
+		destPath = filepath.Join(dir, base+suffix+ext)
+	}
 
 	job := &transcoder.TranscodeJob{
 		ID:         fmt.Sprintf("job-%d", entry.ID),
@@ -252,6 +273,16 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 	}
 	defer sem.Release()
 
+	// Track active worker gauge in metrics
+	metrics := observability.GetMetrics()
+	if isHW {
+		metrics.ActiveGPUSessions.Add(1)
+		defer metrics.ActiveGPUSessions.Add(-1)
+	} else {
+		metrics.ActiveCPUWorkers.Add(1)
+		defer metrics.ActiveCPUWorkers.Add(-1)
+	}
+
 	// Run transcode engine
 	result, err := wp.tc.Execute(ctx, job)
 	if err != nil {
@@ -273,6 +304,20 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 		return
 	}
 
+	// Check if quality verification failed
+	if result.FailedQualityCheck {
+		wp.db.UpdateJobState(entry.ID, persistence.StateQualityFailed, result.VerificationReason)
+		wp.db.RecordAudit(&persistence.AuditLog{
+			EventType:   "job_quality_failed",
+			Severity:    "warn",
+			PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"orig_size":%d,"new_size":%d,"vmaf":%.2f,"reason":%q}`, entry.ID, result.OriginalSize, result.NewSize, result.VMAFScore, result.VerificationReason),
+		})
+		if wp.onEvent != nil {
+			wp.onEvent("job_quality_failed", result)
+		}
+		return
+	}
+
 	// Success! Update DB and metrics
 	wp.db.UpdateJobState(entry.ID, persistence.StateCompleted, "")
 	wp.db.RecordAudit(&persistence.AuditLog{
@@ -281,7 +326,6 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 		PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"orig_size":%d,"new_size":%d,"saved_bytes":%d,"vmaf":%.2f,"duration":%.2f,"encoder":%q,"hw":%v}`, entry.ID, result.OriginalSize, result.NewSize, result.SavedBytes, result.VMAFScore, result.DurationSec, result.EncoderUsed, result.IsHardware),
 	})
 
-	metrics := observability.GetMetrics()
 	metrics.JobsCompletedTotal.Add(1)
 	if result.SavedBytes > 0 {
 		metrics.BytesSavedTotal.Add(uint64(result.SavedBytes))

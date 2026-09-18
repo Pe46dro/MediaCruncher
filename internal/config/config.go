@@ -73,6 +73,9 @@ type TranscoderConfig struct {
 	VMAFSampleCount      int           `yaml:"vmaf_sample_count"`     // default 3
 	VMAFSampleDuration   int           `yaml:"vmaf_sample_duration"`  // seconds, default 30
 	SkipIfLarger         bool          `yaml:"skip_if_larger"`        // default true
+	OverwriteSource      *bool         `yaml:"overwrite_source"`      // default true (in-place replacement)
+	OutputDir            string        `yaml:"output_dir"`            // optional directory if overwrite_source is false
+	OutputSuffix         string        `yaml:"output_suffix"`         // e.g. "_transcoded" or ".crunched" if saving in same dir without overwrite
 	Presets              []PresetConfig `yaml:"presets"`
 	MaxJobDuration       time.Duration `yaml:"max_job_duration"`      // default 4 hours
 }
@@ -192,6 +195,8 @@ func DefaultConfig() *Config {
 			VMAFSampleCount:      3,
 			VMAFSampleDuration:   30,
 			SkipIfLarger:         true,
+			OverwriteSource:      boolPtr(true),
+			OutputSuffix:         "_transcoded",
 			MaxJobDuration:       4 * time.Hour,
 			Presets: []PresetConfig{
 				{
@@ -331,4 +336,33 @@ func (m *Manager) OnReload(fn func(*Config)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.listeners = append(m.listeners, fn)
+}
+
+// Update updates the configuration snapshot, writes changes to disk if configured, and notifies listeners.
+func (m *Manager) Update(newCfg *Config) error {
+	normalizeConfigPaths(newCfg)
+
+	if m.filePath != "" {
+		data, err := yaml.Marshal(newCfg)
+		if err != nil {
+			return fmt.Errorf("failed to marshal config yaml: %w", err)
+		}
+		if err := os.WriteFile(m.filePath, data, 0644); err != nil {
+			return fmt.Errorf("failed to write config file %s: %w", m.filePath, err)
+		}
+	}
+
+	m.mu.Lock()
+	m.current = newCfg
+	listeners := append([]func(*Config){}, m.listeners...)
+	m.mu.Unlock()
+
+	for _, l := range listeners {
+		l(m.current)
+	}
+	return nil
+}
+
+func boolPtr(b bool) *bool {
+	return &b
 }

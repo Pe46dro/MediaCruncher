@@ -1,0 +1,202 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  GO_VERSION: '1.25'
+  ARTIFACT_RETENTION_DAYS: 30
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }} / ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: amd64
+            goos: linux
+          - os: ubuntu-latest
+            arch: arm64
+            goos: linux
+          - os: windows-latest
+            arch: amd64
+            goos: windows
+          - os: macos-latest
+            arch: amd64
+            goos: darwin
+          - os: macos-latest
+            arch: arm64
+            goos: darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Run tests
+        run: go test -v -race -count=1 ./...
+
+      - name: Run vet
+        run: go vet ./...
+
+      - name: Extract version from tag
+        id: version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "version=${TAG}" >> $GITHUB_OUTPUT
+
+      - name: Build binary
+        id: build
+        shell: pwsh
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          $buildDir = "dist"
+          if (!(Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir | Out-Null }
+
+          $commitHash = (git rev-parse --short HEAD)
+          $buildTime = (Get-Date -Format "yyyyMMdd-HHmmss")
+          $version = "${{ steps.version.outputs.version }}"
+
+          $ldflags = "-X mediacruncher/internal/observability.BuildVersion=$version -X mediacruncher/internal/observability.BuildCommit=$commitHash -X mediacruncher/internal/observability.BuildTime=$buildTime"
+
+          $ext = if ($env:GOOS -eq "windows") { ".exe" } else { "" }
+          $binaryName = "mediacruncher-$($env:GOOS)-$($env:GOARCH)$ext"
+          $outputPath = Join-Path $buildDir $binaryName
+
+          go build -ldflags="$ldflags" -o $outputPath ./cmd/main.go
+
+          echo "binary=$outputPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+          echo "binary_name=$binaryName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          $buildDir = "dist"
+          $binaryFile = Get-ChildItem -Path $buildDir -File | Where-Object { $_.Extension -ne ".sha256" -and $_.Extension -ne ".sig" } | Select-Object -First 1
+          if (-not $binaryFile) {
+              Write-Error "No binary found in $buildDir to checksum"
+              exit 1
+          }
+          $binaryPath = $binaryFile.FullName
+          $binaryName = $binaryFile.Name
+          $hash = (Get-FileHash -Path $binaryPath -Algorithm SHA256).Hash.ToString().ToLower()
+          $checksumContent = "$hash  $binaryName"
+          $checksumContent | Out-File -FilePath "$binaryPath.sha256" -Encoding utf8
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mediacruncher-${{ matrix.goos }}-${{ matrix.arch }}
+          path: dist/
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+
+  sign-and-release:
+    name: Sign & Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: all-artifacts
+
+      - name: Setup signing key
+        run: |
+          mkdir -p .signing
+          if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
+            echo "${{ secrets.SIGNING_KEY }}" | base64 -d > .signing/signing_key.pem
+            chmod 600 .signing/signing_key.pem
+          fi
+
+      - name: Sign all binaries
+        run: |
+          if [ -f .signing/signing_key.pem ] && [ -s .signing/signing_key.pem ]; then
+            for dir in all-artifacts/*/; do
+              binary=$(find "$dir" -maxdepth 1 -type f \( -name "mediacruncher-*" \) ! -name "*.sha256" ! -name "*.sig")
+              if [ -n "$binary" ]; then
+                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
+                echo "Signed: $binary"
+              fi
+            done
+          else
+            echo "Warning: SIGNING_KEY not provided or empty, skipping signature"
+          fi
+
+      - name: Generate checksums file
+        run: |
+          > checksums.txt
+          for dir in all-artifacts/*/; do
+            for file in "$dir"mediacruncher-*; do
+              if [ -f "$file" ] && [[ "$file" != *.sha256 ]] && [[ "$file" != *.sig ]]; then
+                (cd "$dir" && sha256sum "$(basename "$file")") >> checksums.txt
+              fi
+            done
+          done
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            all-artifacts/**/*
+            checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+          body: |
+            ## MediaCruncher ${{ github.ref_name }}
+
+            ### Downloads
+
+            | Platform | Architecture | Binary |
+            |----------|-------------|--------|
+            | Linux | amd64 | `mediacruncher-linux-amd64` |
+            | Linux | arm64 | `mediacruncher-linux-arm64` |
+            | Windows | amd64 | `mediacruncher-windows-amd64.exe` |
+            | macOS | amd64 | `mediacruncher-darwin-amd64` |
+            | macOS | arm64 | `mediacruncher-darwin-arm64` |
+
+            ### Docker Image
+
+            Available on GitHub Container Registry:
+
+            ```bash
+            docker pull ghcr.io/pe46dro/mediacruncher:${{ github.ref_name }}
+            docker pull ghcr.io/pe46dro/mediacruncher:latest
+            ```
+
+            ### Verification
+
+            Each binary includes an individual SHA-256 checksum (`.sha256`) and an optional ECDSA signature (`.sig`).
+            Verify with:
+
+            ```bash
+            openssl dgst -sha256 -verify <(echo "<public-key>") -signature <binary>.sig <binary>
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

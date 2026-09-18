@@ -2,6 +2,8 @@ package transcoder
 
 import (
 	"context"
+	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -51,29 +53,65 @@ func DetectHardwareCapabilities(ctx context.Context) *HardwareProfile {
 		out := string(stdout)
 		for _, line := range strings.Split(out, "\n") {
 			line = strings.TrimSpace(line)
-			if strings.Contains(line, "nvenc") {
-				profile.HasNVENC = true
-			}
-			if strings.Contains(line, "qsv") {
-				profile.HasQuickSync = true
-			}
-			if strings.Contains(line, "amf") {
-				profile.HasAMF = true
-			}
-			if strings.Contains(line, "vaapi") {
-				profile.HasVAAPI = true
-			}
-
 			fields := strings.Fields(line)
 			if len(fields) >= 2 {
 				encoderName := fields[1]
 				profile.Encoders[encoderName] = true
 			}
 		}
+
+		// Verify actual hardware initialization capability (especially in Docker/containers)
+		hwEncoders := []string{
+			"hevc_nvenc", "h264_nvenc", "av1_nvenc",
+			"hevc_qsv", "h264_qsv", "av1_qsv",
+			"hevc_amf", "h264_amf",
+			"hevc_vaapi", "h264_vaapi",
+		}
+		for _, enc := range hwEncoders {
+			if profile.Encoders[enc] {
+				if !isEncoderFunctional(ctx, enc) {
+					delete(profile.Encoders, enc)
+				}
+			}
+		}
+
+		profile.HasNVENC = profile.Encoders["hevc_nvenc"] || profile.Encoders["h264_nvenc"] || profile.Encoders["av1_nvenc"]
+		profile.HasQuickSync = profile.Encoders["hevc_qsv"] || profile.Encoders["h264_qsv"] || profile.Encoders["av1_qsv"]
+		profile.HasAMF = profile.Encoders["hevc_amf"] || profile.Encoders["h264_amf"]
+		profile.HasVAAPI = profile.Encoders["hevc_vaapi"] || profile.Encoders["h264_vaapi"]
 	}
 
 	cachedProfile = profile
 	return profile
+}
+
+func isEncoderFunctional(ctx context.Context, encoder string) bool {
+	if runtime.GOOS == "linux" {
+		// Quick device existence checks on Linux / Docker
+		if strings.Contains(encoder, "qsv") || strings.Contains(encoder, "vaapi") {
+			if _, err := os.Stat("/dev/dri"); os.IsNotExist(err) {
+				return false
+			}
+		}
+		if strings.Contains(encoder, "nvenc") {
+			hasNvidia := false
+			if _, err := os.Stat("/dev/dxg"); err == nil {
+				hasNvidia = true // WSL2 Direct3D / NVIDIA Passthrough
+			} else if _, err := os.Stat("/dev/nvidiactl"); err == nil {
+				hasNvidia = true
+			} else if _, err := os.Stat("/dev/nvidia0"); err == nil {
+				hasNvidia = true
+			}
+			if !hasNvidia {
+				return false
+			}
+		}
+	}
+
+	testCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+	defer cancel()
+	_, _, err := proc.RunCommand(testCtx, "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-c:v", encoder, "-f", "null", "-")
+	return err == nil
 }
 
 // SelectEncoder resolves the optimal ffmpeg video encoder based on hardware availability.
@@ -128,6 +166,24 @@ func (p *HardwareProfile) SelectEncoder(targetCodec string, hwAccelPref string) 
 			case "h264":
 				if p.Encoders["h264_amf"] {
 					return "h264_amf", true
+				}
+			}
+		}
+
+		// Try VAAPI (Intel / AMD GPU on Linux)
+		if (pref == "auto" || pref == "vaapi") && p.HasVAAPI {
+			switch codec {
+			case "hevc", "h265":
+				if p.Encoders["hevc_vaapi"] {
+					return "hevc_vaapi", true
+				}
+			case "h264", "avc":
+				if p.Encoders["h264_vaapi"] {
+					return "h264_vaapi", true
+				}
+			case "av1":
+				if p.Encoders["av1_vaapi"] {
+					return "av1_vaapi", true
 				}
 			}
 		}

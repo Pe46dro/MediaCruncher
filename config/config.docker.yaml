@@ -1,19 +1,20 @@
-# MediaCruncher Production Configuration Example
+# MediaCruncher Container Configuration
 
 database:
-  path: "mediacruncher.db"
-  busy_timeout: 5000 # milliseconds to wait on locked SQLite transactions
+  path: "/var/lib/mediacruncher/mediacruncher.db"
+  busy_timeout: 5000
 
 filesystem:
   ingestion_capacity: 5000
   scopes:
-    - path: "/media/library"
+    - path: "/media"
       extensions:
         - ".mp4"
         - ".mkv"
         - ".mov"
         - ".avi"
         - ".m4v"
+        - ".webm"
       exclusions:
         - "*.part"
         - "*.tmp"
@@ -23,12 +24,12 @@ filesystem:
       follow_symlinks: false
 
 evaluation:
-  default_action: "transcode" # transcode, copy, skip, review
+  default_action: "transcode"
   default_preset: "balanced-hevc"
 
   audio_preservation:
-    retain_surround_tracks: true # preserve 5.1/7.1 channels
-    copy_lossless_audio: true    # preserve TrueHD, DTS-HD MA, FLAC
+    retain_surround_tracks: true
+    copy_lossless_audio: true
     preferred_languages:
       - "eng"
       - "ita"
@@ -60,7 +61,7 @@ evaluation:
       audio_action: "copy"
       retain_subtitles: true
 
-    - name: "Transcode Legacy MPEG4/DivX to HEVC"
+    - name: "Transcode Legacy MPEG4 to HEVC"
       priority: 70
       conditions:
         codec: "mpeg4,msmpeg4,divx"
@@ -71,22 +72,22 @@ evaluation:
 
 transcoder:
   hardware_acceleration: "auto" # auto, nvenc, qsv, amf, vaapi, cpu
-  staging_dir: "staging"
+  staging_dir: "/tmp/mediacruncher/staging"
   vmaf_enabled: true
-  vmaf_threshold: 93.0
+  vmaf_threshold: 92.0
   vmaf_sample_count: 3
   vmaf_sample_duration: 30
   skip_if_larger: true
-  overwrite_source: true # Set to true to replace the source media file in-place; set to false to create a new file
-  output_dir: ""         # Target directory if overwrite_source is false (empty = same folder as source file)
-  output_suffix: "_crunched" # Filename suffix attached before extension when overwrite_source is false
+  overwrite_source: false # true: sovrascrive il file originale in-place; false: salva una nuova copia
+  output_dir: ""         # se overwrite_source è false, cartella personalizzata (vuoto = stessa cartella del sorgente)
+  output_suffix: "_crunched" # suffisso applicato al nome file se overwrite_source è false
   max_job_duration: "4h"
 
   presets:
     - name: "balanced-hevc"
       video_codec: "hevc"
       quality_crf: 22
-      preset_speed: "medium" # or p5 for NVENC
+      preset_speed: "medium"
       audio_codec: "copy"
 
     - name: "efficient-av1"
@@ -96,16 +97,10 @@ transcoder:
       audio_codec: "opus"
       audio_bitrate: "128k"
 
-    - name: "archival-hevc"
-      video_codec: "hevc"
-      quality_crf: 18
-      preset_speed: "slow"
-      audio_codec: "copy"
-
 concurrency:
-  worker_count: 4
-  gpu_semaphore_limit: 2 # max concurrent GPU encoding sessions
-  cpu_semaphore_limit: 4 # max concurrent CPU encoding sessions
+  worker_count: 1
+  gpu_semaphore_limit: 1
+  cpu_semaphore_limit: 1
   prefetch_buffer_depth: 50
   drain_timeout: "5m"
   retry_max_attempts: 3
@@ -116,30 +111,9 @@ notification:
   batch_window: "30s"
   batch_max_size: 10
   rate_limit_per_minute: 30
-  channels:
-    - type: "discord"
-      target: "https://discord.com/api/webhooks/your-webhook-id/your-webhook-token"
-      events:
-        - "job_completed"
-        - "job_failed"
-        - "batch_summary"
-
-    - type: "telegram"
-      token: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
-      target: "-1001234567890" # chat or channel ID
-      events:
-        - "job_completed"
-        - "job_failed"
-
-    - type: "webhook"
-      target: "https://your-api.domain.com/webhooks/mediacruncher"
-      token: "secret-hmac-key"
-      events:
-        - "job_completed"
-        - "job_failed"
-        - "batch_summary"
+  channels: []
 
 observability:
-  log_level: "info" # debug, info, warn, error
+  log_level: "info"
   log_json: true
   metrics_port: 9090
