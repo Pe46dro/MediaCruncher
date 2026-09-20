@@ -65,6 +65,37 @@ func TestServerEndpoints(t *testing.T) {
 		t.Fatalf("expected 200 for /static/style.css, got %d", wCSS.Code)
 	}
 
+	// 2b. Test Favicon & Icons
+	reqFavicon := httptest.NewRequest(http.MethodGet, "/favicon.ico", nil)
+	wFavicon := httptest.NewRecorder()
+	handler.ServeHTTP(wFavicon, reqFavicon)
+	if wFavicon.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /favicon.ico, got %d", wFavicon.Code)
+	}
+	if ct := wFavicon.Header().Get("Content-Type"); ct != "image/x-icon" {
+		t.Errorf("expected Content-Type image/x-icon, got %s", ct)
+	}
+
+	reqFaviconSVG := httptest.NewRequest(http.MethodGet, "/favicon.svg", nil)
+	wFaviconSVG := httptest.NewRecorder()
+	handler.ServeHTTP(wFaviconSVG, reqFaviconSVG)
+	if wFaviconSVG.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /favicon.svg, got %d", wFaviconSVG.Code)
+	}
+	if ct := wFaviconSVG.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Errorf("expected Content-Type image/svg+xml, got %s", ct)
+	}
+
+	reqTouch := httptest.NewRequest(http.MethodGet, "/apple-touch-icon.png", nil)
+	wTouch := httptest.NewRecorder()
+	handler.ServeHTTP(wTouch, reqTouch)
+	if wTouch.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /apple-touch-icon.png, got %d", wTouch.Code)
+	}
+	if ct := wTouch.Header().Get("Content-Type"); ct != "image/png" {
+		t.Errorf("expected Content-Type image/png, got %s", ct)
+	}
+
 	// 3. Test API Status
 	reqStatus := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	wStatus := httptest.NewRecorder()
