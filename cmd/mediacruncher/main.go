@@ -151,13 +151,11 @@ func runDaemon(args []string) {
 	go func() {
 		for rec := range buf.Records() {
 			if rec.IsDuplicate {
-				observability.GetMetrics().DeduplicatedFiles.Add(1)
 				continue
 			}
 			priority := 50
 			_, err := db.Enqueue(rec.Path, priority)
 			if err == nil {
-				observability.GetMetrics().FilesScannedTotal.Add(1)
 				observability.GetMetrics().JobsSubmittedTotal.Add(1)
 				workerPool.TriggerPrefetch()
 			}

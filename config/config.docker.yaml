@@ -90,6 +90,12 @@ transcoder:
       preset_speed: "medium"
       audio_codec: "copy"
 
+    - name: "balanced-h264"
+      video_codec: "h264"
+      quality_crf: 22
+      preset_speed: "medium"
+      audio_codec: "copy"
+
     - name: "efficient-av1"
       video_codec: "av1"
       quality_crf: 26

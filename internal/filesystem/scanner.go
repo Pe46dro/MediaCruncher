@@ -119,6 +119,14 @@ func (s *Scanner) scanScope(ctx context.Context, scope config.ScanScopeConfig, r
 			}
 		}
 
+		// Automatically skip already crunched files (*_crunched.*)
+		extWithDot := filepath.Ext(fileName)
+		baseName := strings.TrimSuffix(fileName, extWithDot)
+		if strings.HasSuffix(strings.ToLower(baseName), "_crunched") {
+			report.SkippedExclusions++
+			return nil
+		}
+
 		// Check extensions
 		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(fileName), "."))
 		if len(allowedExts) > 0 && !allowedExts[ext] {

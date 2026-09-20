@@ -110,7 +110,24 @@ func isEncoderFunctional(ctx context.Context, encoder string) bool {
 
 	testCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
 	defer cancel()
-	_, _, err := proc.RunCommand(testCtx, "ffmpeg", "-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-c:v", encoder, "-f", "null", "-")
+
+	var cmdArgs []string
+	if strings.Contains(encoder, "vaapi") {
+		// VAAPI requires initializing the hw device and uploading frames
+		renderDevice := "/dev/dri/renderD128"
+		if _, err := os.Stat(renderDevice); os.IsNotExist(err) {
+			renderDevice = ""
+		}
+		if renderDevice != "" {
+			cmdArgs = []string{"-y", "-init_hw_device", "vaapi=va:" + renderDevice, "-filter_hw_device", "va", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-vf", "format=nv12,hwupload", "-c:v", encoder, "-f", "null", "-"}
+		} else {
+			cmdArgs = []string{"-y", "-init_hw_device", "vaapi=va", "-filter_hw_device", "va", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-vf", "format=nv12,hwupload", "-c:v", encoder, "-f", "null", "-"}
+		}
+	} else {
+		cmdArgs = []string{"-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-c:v", encoder, "-f", "null", "-"}
+	}
+
+	_, _, err := proc.RunCommand(testCtx, "ffmpeg", cmdArgs...)
 	return err == nil
 }
 
@@ -177,6 +194,11 @@ func (p *HardwareProfile) SelectEncoder(targetCodec string, hwAccelPref string) 
 				if p.Encoders["hevc_vaapi"] {
 					return "hevc_vaapi", true
 				}
+				// Hardware Fallback: if HEVC hardware encoder is not supported by the GPU (e.g. Braswell/Apollo Lake),
+				// fallback to available H264 hardware encoder rather than crashing CPU with libx265
+				if p.Encoders["h264_vaapi"] {
+					return "h264_vaapi", true
+				}
 			case "h264", "avc":
 				if p.Encoders["h264_vaapi"] {
 					return "h264_vaapi", true
@@ -185,11 +207,17 @@ func (p *HardwareProfile) SelectEncoder(targetCodec string, hwAccelPref string) 
 				if p.Encoders["av1_vaapi"] {
 					return "av1_vaapi", true
 				}
+				if p.Encoders["hevc_vaapi"] {
+					return "hevc_vaapi", true
+				}
+				if p.Encoders["h264_vaapi"] {
+					return "h264_vaapi", true
+				}
 			}
 		}
 	}
 
-	// Fallback to high-quality software encoding
+	// Fallback to software encoding if no hardware matches
 	switch codec {
 	case "hevc", "h265":
 		return "libx265", false

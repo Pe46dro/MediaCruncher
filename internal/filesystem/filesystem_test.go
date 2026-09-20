@@ -60,6 +60,7 @@ func TestScanner(t *testing.T) {
 	// Create files
 	media1 := filepath.Join(tmpDir, "movie1.mkv")
 	media2 := filepath.Join(tmpDir, "movie2.mp4")
+	crunchedFile := filepath.Join(tmpDir, "movie2_crunched.mp4")
 	tempFile := filepath.Join(tmpDir, "movie.temp")
 	subDir := filepath.Join(tmpDir, "nested")
 	os.Mkdir(subDir, 0755)
@@ -67,6 +68,7 @@ func TestScanner(t *testing.T) {
 
 	os.WriteFile(media1, []byte("movie 1 data"), 0644)
 	os.WriteFile(media2, []byte("movie 2 data"), 0644)
+	os.WriteFile(crunchedFile, []byte("movie 2 crunched data"), 0644)
 	os.WriteFile(tempFile, []byte("temp data"), 0644)
 	os.WriteFile(media3, []byte("movie 3 data"), 0644)
 
@@ -93,8 +95,8 @@ func TestScanner(t *testing.T) {
 	if report.Accepted != 3 {
 		t.Errorf("expected 3 accepted media files, got %d", report.Accepted)
 	}
-	if report.SkippedExclusions != 1 {
-		t.Errorf("expected 1 skipped by exclusion (*.temp), got %d", report.SkippedExclusions)
+	if report.SkippedExclusions != 2 {
+		t.Errorf("expected 2 skipped by exclusion (*.temp and *_crunched), got %d", report.SkippedExclusions)
 	}
 	if buffer.Len() != 3 {
 		t.Errorf("expected 3 items in ingestion buffer, got %d", buffer.Len())

@@ -132,8 +132,18 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	args := []string{
 		"-hide_banner",
 		"-y",
-		"-i", job.SourcePath,
 	}
+
+	if isHW && strings.Contains(encoder, "vaapi") {
+		renderDevice := "/dev/dri/renderD128"
+		if _, err := os.Stat(renderDevice); err == nil {
+			args = append(args, "-init_hw_device", "vaapi=va:"+renderDevice, "-filter_hw_device", "va")
+		} else {
+			args = append(args, "-init_hw_device", "vaapi=va", "-filter_hw_device", "va")
+		}
+	}
+
+	args = append(args, "-i", job.SourcePath)
 
 	// Apply stream mapping
 	if len(job.Plan.MapArgs) > 0 {
@@ -144,6 +154,9 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 
 	// Configure Video Encoder
 	args = append(args, "-c:v", encoder)
+	if isHW && strings.Contains(encoder, "vaapi") {
+		args = append(args, "-vf", "format=nv12,hwupload")
+	}
 	crf := job.Preset.QualityCRF
 	if crf <= 0 {
 		crf = 22

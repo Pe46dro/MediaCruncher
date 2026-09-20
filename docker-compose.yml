@@ -6,6 +6,7 @@ services:
     image: mediacruncher:latest
     container_name: mediacruncher
     restart: unless-stopped
+    user: "0:0"
 
     # Ports for Prometheus metrics and health check endpoint
     ports:
@@ -18,6 +19,7 @@ services:
       - MEDIACRUNCHER_DB_PATH=/var/lib/mediacruncher/mediacruncher.db
       - MEDIACRUNCHER_METRICS_PORT=9090
       - NVIDIA_VISIBLE_DEVICES=all
+      - LIBVA_DRIVER_NAME=i965
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       # - MEDIACRUNCHER_HWACCEL=auto # auto, nvenc, qsv, amf, vaapi, cpu
 
@@ -45,15 +47,15 @@ services:
 
     # Hardware Acceleration Configurations:
     # 1. NVIDIA NVENC (default active reservation):
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, video]
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: all
+    #          capabilities: [gpu, video]
 
     # 2. Intel GPU (QuickSync / QSV) & AMD (VAAPI) on Linux / WSL2:
     # Uncomment the devices section below to pass the Intel/AMD GPU render node to Docker:
-    # devices:
-    #   - /dev/dri:/dev/dri
+    devices:
+      - /dev/dri:/dev/dri

@@ -151,6 +151,22 @@ func (wp *WorkerPool) processEntry(parentCtx context.Context, entry *persistence
 		cancel()
 	}()
 
+	fileName := filepath.Base(entry.FilePath)
+	ext := filepath.Ext(fileName)
+	baseName := strings.TrimSuffix(fileName, ext)
+	if strings.HasSuffix(strings.ToLower(baseName), "_crunched") {
+		wp.db.UpdateJobState(entry.ID, persistence.StateSkipped, "auto-skipped: already crunched (_crunched suffix)")
+		wp.db.RecordAudit(&persistence.AuditLog{
+			EventType:   "job_skipped",
+			Severity:    "info",
+			PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"action":"skip","reason":"already crunched (_crunched suffix)"}`, entry.ID),
+		})
+		if wp.onEvent != nil {
+			wp.onEvent("job_skipped", entry)
+		}
+		return
+	}
+
 	// 1. Stage: Evaluation
 	if err := wp.db.UpdateJobState(entry.ID, persistence.StateEvaluating, ""); err != nil {
 		slog.Error("Failed to update job state to evaluating", "id", entry.ID, "err", err)
