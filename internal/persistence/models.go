@@ -14,6 +14,7 @@ const (
 	StateProcessing        JobState = "processing"
 	StateCompleted         JobState = "completed"
 	StateSkipped           JobState = "skipped"
+	StatePaused            JobState = "paused"
 	StateFailed            JobState = "failed"
 	StateQualityFailed     JobState = "quality_failed"
 	StateReviewRequired    JobState = "review_required"

@@ -100,6 +100,41 @@ func TestPersistenceEngineConcurrent(t *testing.T) {
 		t.Fatalf("failed to update state: %v", err)
 	}
 
+	// Test PauseJob and RequeueJob
+	if err := engine.PauseJob(firstItem.ID); err != nil {
+		t.Fatalf("failed to pause job: %v", err)
+	}
+	entry, err := engine.GetQueueEntry(firstItem.ID)
+	if err != nil || entry.State != StatePaused {
+		t.Fatalf("expected job state paused, got %v", entry.State)
+	}
+	if err := engine.RequeueJob(firstItem.ID); err != nil {
+		t.Fatalf("failed to requeue job: %v", err)
+	}
+	entry, err = engine.GetQueueEntry(firstItem.ID)
+	if err != nil || entry.State != StatePending {
+		t.Fatalf("expected job state pending after requeue, got %v", entry.State)
+	}
+
+	// Test IgnoreJob (soft-delete)
+	if err := engine.IgnoreJob(firstItem.ID); err != nil {
+		t.Fatalf("failed to ignore job: %v", err)
+	}
+	entry, err = engine.GetQueueEntry(firstItem.ID)
+	if err != nil || entry.State != StateSkipped || entry.ErrorMessage != "Manually excluded by user" {
+		t.Fatalf("expected job state skipped with exclusion message, got %v (%s)", entry.State, entry.ErrorMessage)
+	}
+
+	// Test SetJobPriority
+	if err := engine.SetJobPriority(firstItem.ID, 99); err != nil {
+		t.Fatalf("failed to set job priority: %v", err)
+	}
+	entry, err = engine.GetQueueEntry(firstItem.ID)
+	if err != nil || entry.Priority != 99 {
+		t.Fatalf("expected job priority 99, got %d", entry.Priority)
+	}
+
+
 	// Test Crash Recovery: Artificially reset lease expiration to the past
 	_, err = engine.execWrite(func(tx *sql.Tx) (any, error) {
 		_, err := tx.Exec("UPDATE queue_entries SET lease_expires_at = datetime('now', '-10 minutes') WHERE state = ?", StateLeased)

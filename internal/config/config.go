@@ -29,6 +29,7 @@ type DatabaseConfig struct {
 }
 
 type FilesystemConfig struct {
+	ScanInterval      time.Duration     `yaml:"scan_interval"`      // interval between automatic directory scans (default 20s)
 	Scopes            []ScanScopeConfig `yaml:"scopes"`
 	IngestionCapacity int               `yaml:"ingestion_capacity"` // default 5000
 }
@@ -140,6 +141,7 @@ func DefaultConfig() *Config {
 			BusyTimeout: 5000,
 		},
 		Filesystem: FilesystemConfig{
+			ScanInterval:      20 * time.Second,
 			Scopes: []ScanScopeConfig{
 				{
 					Path:           filepath.Join(home, "Videos"),
@@ -292,6 +294,11 @@ func applyEnvOverrides(cfg *Config) {
 	}
 	if val := os.Getenv("MEDIACRUNCHER_HWACCEL"); val != "" {
 		cfg.Transcoder.HardwareAcceleration = strings.ToLower(val)
+	}
+	if val := os.Getenv("MEDIACRUNCHER_SCAN_INTERVAL"); val != "" {
+		if d, err := time.ParseDuration(val); err == nil && d >= 0 {
+			cfg.Filesystem.ScanInterval = d
+		}
 	}
 }
 

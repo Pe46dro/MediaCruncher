@@ -216,3 +216,57 @@ func TestWorkerPoolExecution(t *testing.T) {
 
 	pool.DrainAndStop(2 * time.Second)
 }
+
+func TestWorkerPoolPriorityOrdering(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "prio_test_*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "prio.db")
+	db, err := persistence.NewEngine(dbPath, 5000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// Enqueue job 1 with default priority 50
+	id1, _ := db.Enqueue("/media/job1.mp4", 50)
+	// Enqueue job 2 with default priority 50
+	id2, _ := db.Enqueue("/media/job2.mp4", 50)
+	// Enqueue job 3 with priority 10
+	id3, _ := db.Enqueue("/media/job3.mp4", 10)
+
+	// Now reprioritize job 2 to 100
+	if err := db.SetJobPriority(id2, 100); err != nil {
+		t.Fatalf("failed to reprioritize job 2: %v", err)
+	}
+
+	// First lease should pick job 2 (priority 100)
+	batch1, err := db.LeaseBatch("w1", 1, 10*time.Minute)
+	if err != nil || len(batch1) != 1 {
+		t.Fatalf("expected 1 leased job, got %d, err: %v", len(batch1), err)
+	}
+	if batch1[0].ID != id2 {
+		t.Fatalf("expected highest priority job (%d) to be leased first, got job %d (priority %d)", id2, batch1[0].ID, batch1[0].Priority)
+	}
+
+	// Second lease should pick job 1 (priority 50)
+	batch2, err := db.LeaseBatch("w1", 1, 10*time.Minute)
+	if err != nil || len(batch2) != 1 {
+		t.Fatalf("expected 1 leased job, got %d, err: %v", len(batch2), err)
+	}
+	if batch2[0].ID != id1 {
+		t.Fatalf("expected job 1 (priority 50) to be leased second, got job %d", batch2[0].ID)
+	}
+
+	// Third lease should pick job 3 (priority 10)
+	batch3, err := db.LeaseBatch("w1", 1, 10*time.Minute)
+	if err != nil || len(batch3) != 1 {
+		t.Fatalf("expected 1 leased job, got %d, err: %v", len(batch3), err)
+	}
+	if batch3[0].ID != id3 {
+		t.Fatalf("expected job 3 (priority 10) to be leased third, got job %d", batch3[0].ID)
+	}
+}

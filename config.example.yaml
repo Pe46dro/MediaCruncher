@@ -5,6 +5,7 @@ database:
   busy_timeout: 5000 # milliseconds to wait on locked SQLite transactions
 
 filesystem:
+  scan_interval: "20s" # interval between automatic scans (e.g. 20s, 1m, 5m; 0 to disable)
   ingestion_capacity: 5000
   scopes:
     - path: "/media/library"

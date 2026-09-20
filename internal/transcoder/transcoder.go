@@ -287,8 +287,13 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 			t.cfg.VMAFSampleDuration,
 			vmafCb,
 		)
+		if ctx.Err() != nil {
+			_ = os.Remove(stagedPath)
+			return nil, ctx.Err()
+		}
 		if err != nil {
 			reason = fmt.Sprintf("quality verification error: %v", err)
+			verified = false
 		} else if verifyRes != nil {
 			vmafScore = verifyRes.AverageVMAF
 			ssimScore = verifyRes.SSIMScore
@@ -297,6 +302,7 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 		}
 
 		if !verified {
+			_ = os.Remove(stagedPath)
 			return &TranscodeResult{
 				JobID:              job.ID,
 				SourcePath:         job.SourcePath,
@@ -316,9 +322,15 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 		}
 	}
 
+	if ctx.Err() != nil {
+		_ = os.Remove(stagedPath)
+		return nil, ctx.Err()
+	}
+
 	// Atomic promotion to final destination
 	inPlace := (job.SourcePath == job.DestPath)
 	if err := PromoteFile(stagedPath, job.DestPath, inPlace); err != nil {
+		_ = os.Remove(stagedPath)
 		return nil, fmt.Errorf("failed to promote transcoded file to destination: %w", err)
 	}
 

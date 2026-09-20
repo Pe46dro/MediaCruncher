@@ -5,6 +5,7 @@ database:
   busy_timeout: 5000
 
 filesystem:
+  scan_interval: "20s"
   ingestion_capacity: 5000
   scopes:
     - path: "/media"
@@ -106,7 +107,7 @@ transcoder:
 concurrency:
   worker_count: 1
   gpu_semaphore_limit: 1
-  cpu_semaphore_limit: 1
+  cpu_semaphore_limit: 0
   prefetch_buffer_depth: 50
   drain_timeout: "5m"
   retry_max_attempts: 3

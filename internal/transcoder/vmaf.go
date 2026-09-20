@@ -26,6 +26,10 @@ var (
 
 // RunQualityVerification performs high-throughput stratified segment VMAF verification.
 func RunQualityVerification(ctx context.Context, origFile, transFile string, duration float64, threshold float64, sampleCount, sampleDur int, onProgress ...func(current, total int)) (*VerificationResult, error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
 	if threshold <= 0 {
 		threshold = 93.0
 	}
@@ -47,6 +51,9 @@ func RunQualityVerification(ctx context.Context, origFile, transFile string, dur
 
 	// Step 1: Fast SSIM Pre-filter (samples 15s at midpoint)
 	ssimScore, err := calculateFastSSIM(ctx, origFile, transFile, duration)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err == nil {
 		result.SSIMScore = ssimScore
 		// If SSIM is below 0.90, severe degradation has occurred
@@ -68,6 +75,9 @@ func RunQualityVerification(ctx context.Context, origFile, transFile string, dur
 
 	var scores []float64
 	for i, p := range percentiles {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if onProg != nil {
 			onProg(i+1, len(percentiles))
 		}
@@ -76,6 +86,9 @@ func RunQualityVerification(ctx context.Context, origFile, transFile string, dur
 			startTime = 0
 		}
 		score, err := computeSegmentVMAF(ctx, origFile, transFile, startTime, sampleDur)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err == nil && score > 0 {
 			scores = append(scores, score)
 		}

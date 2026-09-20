@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -137,6 +138,64 @@ func TestServerEndpoints(t *testing.T) {
 	}
 	if !scanned.Load() {
 		t.Errorf("expected scanned callback to be invoked")
+	}
+
+	// 8. Test Queue Item Endpoints: priority, pause, ignore, requeue
+	id, err := db.Enqueue("/media/test_job.mp4", 50)
+	if err != nil {
+		t.Fatalf("failed to enqueue test job: %v", err)
+	}
+
+	// Test Priority update via JSON body
+	pBody, _ := json.Marshal(map[string]int{"priority": 85})
+	reqPrio := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/queue/%d/priority", id), bytes.NewReader(pBody))
+	wPrio := httptest.NewRecorder()
+	handler.ServeHTTP(wPrio, reqPrio)
+	if wPrio.Code != http.StatusOK {
+		t.Fatalf("expected 200 for priority update, got %d: %s", wPrio.Code, wPrio.Body.String())
+	}
+	item, _ := db.GetQueueEntry(id)
+	if item.Priority != 85 {
+		t.Errorf("expected priority 85, got %d", item.Priority)
+	}
+
+	// Test Pause
+	reqPause := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/queue/%d/pause", id), nil)
+	wPause := httptest.NewRecorder()
+	handler.ServeHTTP(wPause, reqPause)
+	if wPause.Code != http.StatusOK {
+		t.Fatalf("expected 200 for pause, got %d", wPause.Code)
+	}
+	item, _ = db.GetQueueEntry(id)
+	if item.State != persistence.StatePaused {
+		t.Errorf("expected state paused, got %s", item.State)
+	}
+
+	// Test Ignore (soft delete)
+	reqIgnore := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/queue/%d/ignore", id), nil)
+	wIgnore := httptest.NewRecorder()
+	handler.ServeHTTP(wIgnore, reqIgnore)
+	if wIgnore.Code != http.StatusOK {
+		t.Fatalf("expected 200 for ignore, got %d", wIgnore.Code)
+	}
+	item, _ = db.GetQueueEntry(id)
+	if item.State != persistence.StateSkipped || item.ErrorMessage != "Manually excluded by user" {
+		t.Errorf("expected state skipped (excluded), got %s (%s)", item.State, item.ErrorMessage)
+	}
+
+	// Test Requeue (resume)
+	reqRequeue := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/queue/%d/requeue", id), nil)
+	wRequeue := httptest.NewRecorder()
+	handler.ServeHTTP(wRequeue, reqRequeue)
+	if wRequeue.Code != http.StatusOK {
+		t.Fatalf("expected 200 for requeue, got %d", wRequeue.Code)
+	}
+	item, _ = db.GetQueueEntry(id)
+	if item.State != persistence.StatePending {
+		t.Errorf("expected state pending after requeue, got %s", item.State)
+	}
+	if item.Priority != 85 {
+		t.Errorf("expected priority to remain 85 after requeue, got %d", item.Priority)
 	}
 
 	_ = s.Shutdown(context.Background())

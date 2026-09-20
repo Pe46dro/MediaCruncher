@@ -8,6 +8,7 @@ let autoRefreshTimer = null;
 let isAutoRefresh = true;
 let editingRuleIndex = -1;
 let editingPresetIndex = -1;
+let selectedPriorityJobId = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
@@ -160,6 +161,38 @@ function initControls() {
 
   // Save all settings
   document.getElementById("btn-save-all-config").addEventListener("click", saveAllSettings);
+
+  // Save priority from modal
+  const savePriorityBtn = document.getElementById("btn-save-priority-dialog");
+  if (savePriorityBtn) {
+    savePriorityBtn.addEventListener("click", savePriority);
+  }
+
+  // Preset buttons in priority modal
+  document.querySelectorAll(".priority-preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const val = btn.getAttribute("data-priority");
+      const input = document.getElementById("priority-custom-input");
+      if (input) input.value = val;
+      document.querySelectorAll(".priority-preset-btn").forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+
+  // Custom priority input synchronizer
+  const priorityInput = document.getElementById("priority-custom-input");
+  if (priorityInput) {
+    priorityInput.addEventListener("input", (e) => {
+      const val = e.target.value.trim();
+      document.querySelectorAll(".priority-preset-btn").forEach(b => {
+        if (b.getAttribute("data-priority") === val) {
+          b.classList.add("active");
+        } else {
+          b.classList.remove("active");
+        }
+      });
+    });
+  }
 }
 
 function startPolling() {
@@ -535,6 +568,8 @@ function renderQueueTable(entries, jobStats = {}, activeProgress = {}) {
       `;
     } else if (entry.state === "skipped") {
       resultHTML = `<span style="color:var(--text-muted); font-size:0.75rem;">${escapeHtml(entry.error_message || "Rule / Size protection")}</span>`;
+    } else if (entry.state === "paused") {
+      resultHTML = `<span style="color:#c084fc; font-size:0.75rem;">⏸ In pausa dall'utente</span>`;
     } else if (entry.state === "failed" || entry.state === "permanently_failed") {
       resultHTML = `<span style="color:var(--accent-rose); font-size:0.75rem; max-width:200px; display:inline-block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(entry.error_message)}">${escapeHtml(entry.error_message || "Execution error")}</span>`;
     } else {
@@ -596,29 +631,44 @@ function renderQueueTable(entries, jobStats = {}, activeProgress = {}) {
           `;
         }
       } else {
+        const initText = entry.state === "leased" ? "In attesa slot worker..." : "Inizializzazione...";
         resultHTML = `
-          <span class="badge-init-pill">
+          <span class="badge-init-pill" title="Job preso in carico dal worker. In attesa di avvio processo.">
             <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#fbbf24;"></span>
-            Initializing...
+            ${initText}
           </span>
         `;
       }
     }
 
+    const isPausable = (entry.state === 'pending' || entry.state === 'leased' || entry.state === 'transcoding' || entry.state === 'evaluating' || entry.state === 'processing');
+    const isResumable = (entry.state === 'paused' || entry.state === 'skipped' || entry.state === 'failed' || entry.state === 'quality_failed' || entry.state === 'permanently_failed');
+    let badgeText = entry.state;
+    if (entry.state === "leased") badgeText = "reserved";
+    else if (entry.state === "paused") badgeText = "paused";
+
     tr.innerHTML = `
       <td style="font-weight:600;">#${entry.id}</td>
       <td class="file-cell" title="${escapeHtml(entry.file_path)}">${escapeHtml(fileName)}</td>
-      <td><span class="badge badge-${entry.state}">${entry.state}</span></td>
+      <td><span class="badge badge-${entry.state}" title="${entry.state === 'leased' ? 'Prenotato dal worker per esecuzione imminente' : entry.state}">${badgeText}</span></td>
       <td>${resultHTML}</td>
-      <td>${entry.priority}</td>
+      <td>
+        <button class="priority-pill" onclick="openPriorityModal(${entry.id}, ${entry.priority})" title="Modifica priorità di elaborazione">
+          ${entry.priority} <span style="font-size:0.7rem; opacity:0.75;">✎</span>
+        </button>
+      </td>
       <td>${entry.retry_count}</td>
       <td>${scheduled}</td>
       <td>
-        <div style="display:flex; gap:0.4rem;">
+        <div style="display:flex; gap:0.35rem; align-items:center;">
           <button class="btn btn-secondary btn-sm" onclick="viewJobDetails(${entry.id})">Details</button>
-          ${entry.state === 'failed' || entry.state === 'quality_failed' || entry.state === 'permanently_failed' || entry.state === 'skipped' ? 
-            `<button class="btn btn-primary btn-sm" onclick="requeueJob(${entry.id})">Requeue</button>` : ''}
-          <button class="btn btn-danger btn-sm" onclick="deleteJob(${entry.id})">Delete</button>
+          <button class="btn btn-secondary btn-sm" onclick="openPriorityModal(${entry.id}, ${entry.priority})" title="Imposta priorità di elaborazione">Priorità</button>
+          ${isPausable ? 
+            `<button class="btn btn-secondary btn-sm" style="color:#fbbf24; border-color:rgba(245,158,11,0.4);" onclick="pauseJob(${entry.id})" title="Metti in pausa temporanea (riprendibile)">Pause</button>
+             <button class="btn btn-secondary btn-sm" style="color:#f87171; border-color:rgba(244,63,94,0.35);" onclick="ignoreJob(${entry.id})" title="Escludi (lo scanner automatico non lo reinserirà)">Escludi</button>` : ''}
+          ${isResumable ? 
+            `<button class="btn btn-primary btn-sm" onclick="requeueJob(${entry.id})" title="Ripristina e avvia transcodifica">Resume</button>` : ''}
+          <button class="btn btn-danger btn-sm" onclick="deleteJob(${entry.id})" title="Elimina definitivamente dal database (attenzione: se il file è ancora su disco verrà rischedulato)" style="padding: 0.25rem 0.45rem; opacity: 0.65;">✕</button>
         </div>
       </td>
     `;
@@ -693,6 +743,10 @@ async function viewJobDetails(id) {
 
     content.innerHTML = `
       ${liveTelemetryHTML}
+      ${data.entry.state === 'leased' ? `
+        <div style="margin-bottom:1rem; padding:0.75rem; background:rgba(245,158,11,0.08); border:1px solid rgba(245,158,11,0.25); border-radius:var(--radius-sm); font-size:0.8rem; color:var(--text-secondary);">
+          <strong>Stato Riservato (Leased):</strong> Questo file è stato preso in carico dal worker ed è in coda di esecuzione immediata. Se il container è stato appena riavviato, il job è stato recuperato automaticamente e ripartirà da capo dal file originale (senza usare parti incomplete rimaste nello stage).
+        </div>` : ''}
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem;">
         <div>
           <p style="font-size:0.78rem; color:var(--text-muted);">FULL FILE PATH</p>
@@ -726,30 +780,111 @@ async function requeueJob(id) {
   try {
     const res = await fetch(`/api/queue/${id}/requeue`, { method: "POST" });
     if (res.ok) {
-      showToast(`Job #${id} requeued to pending`, "success");
+      showToast(`Job #${id} ripristinato in coda`, "success");
       fetchQueue();
     } else {
-      showToast("Failed to requeue job", "error");
+      showToast("Impossibile ripristinare il job", "error");
     }
   } catch (e) {
-    showToast("Network error requeuing job", "error");
+    showToast("Errore di rete durante il ripristino", "error");
+  }
+}
+
+async function pauseJob(id) {
+  try {
+    const res = await fetch(`/api/queue/${id}/pause`, { method: "POST" });
+    if (res.ok) {
+      showToast(`Job #${id} messo in pausa (potrai riprenderlo con Resume)`, "success");
+      fetchQueue();
+    } else {
+      showToast("Impossibile mettere in pausa il job", "error");
+    }
+  } catch (e) {
+    showToast("Errore di rete durante la pausa", "error");
+  }
+}
+
+async function ignoreJob(id) {
+  if (!confirm(`Vuoi escludere il Job #${id} dalla coda?\n\nIl file verrà contrassegnato come 'skipped' e lo scanner automatico periodico NON lo reinserirà più.\n\nPotrai riprendere la codifica in qualsiasi momento cliccando 'Resume'.`)) return;
+  try {
+    const res = await fetch(`/api/queue/${id}/ignore`, { method: "POST" });
+    if (res.ok) {
+      showToast(`Job #${id} escluso dalla coda (non verrà riprocessato)`, "success");
+      fetchQueue();
+    } else {
+      showToast("Impossibile escludere il job", "error");
+    }
+  } catch (e) {
+    showToast("Errore di rete durante l'esclusione", "error");
   }
 }
 
 async function deleteJob(id) {
-  if (!confirm(`Are you sure you want to remove job #${id} from the queue?`)) return;
+  if (!confirm(`ATTENZIONE: Stai per cancellare definitivamente il Job #${id} dal database.\n\nSe il file è ancora presente nella cartella monitorata, lo scanner periodico lo rischedulerà al prossimo ciclo.\nSe desideri semplicemente escluderlo dall'encoding, usa il tasto 'Escludi'.\n\nProcedere con l'eliminazione definitiva?`)) return;
   try {
     const res = await fetch(`/api/queue/${id}/delete`, { method: "POST" });
     if (res.ok) {
-      showToast(`Job #${id} deleted from queue`, "success");
+      showToast(`Job #${id} eliminato definitivamente dal database`, "success");
       fetchQueue();
     } else {
-      showToast("Failed to delete job", "error");
+      showToast("Impossibile eliminare il job", "error");
     }
   } catch (e) {
-    showToast("Network error deleting job", "error");
+    showToast("Errore di rete durante l'eliminazione", "error");
   }
 }
+
+function openPriorityModal(id, currentPriority) {
+  selectedPriorityJobId = id;
+  const titleEl = document.getElementById("modal-priority-title");
+  if (titleEl) titleEl.textContent = `Imposta Priorità Coda (Job #${id})`;
+
+  const prio = currentPriority !== undefined && currentPriority !== null ? currentPriority : 50;
+  const input = document.getElementById("priority-custom-input");
+  if (input) input.value = prio;
+
+  // Highlight matching preset button if any
+  document.querySelectorAll(".priority-preset-btn").forEach(btn => {
+    if (btn.getAttribute("data-priority") === String(prio)) {
+      btn.classList.add("active");
+    } else {
+      btn.classList.remove("active");
+    }
+  });
+
+  openModal("modal-priority");
+}
+
+async function savePriority() {
+  if (!selectedPriorityJobId) return;
+  const input = document.getElementById("priority-custom-input");
+  if (!input) return;
+
+  const val = parseInt(input.value, 10);
+  if (isNaN(val) || val < 1 || val > 1000) {
+    showToast("La priorità deve essere un numero compreso tra 1 e 1000", "error");
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/queue/${selectedPriorityJobId}/priority`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ priority: val })
+    });
+    if (res.ok) {
+      showToast(`Priorità del Job #${selectedPriorityJobId} impostata a ${val}`, "success");
+      closeModal("modal-priority");
+      fetchQueue();
+    } else {
+      const txt = await res.text();
+      showToast(`Errore: ${txt || "Impossibile aggiornare la priorità"}`, "error");
+    }
+  } catch (e) {
+    showToast("Errore di rete durante l'aggiornamento della priorità", "error");
+  }
+}
+
 
 // ==========================================================================
 // API Calls: Configuration & Rules

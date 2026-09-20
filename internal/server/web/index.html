@@ -174,6 +174,7 @@
           <button class="filter-pill" data-state="transcoding">Transcoding</button>
           <button class="filter-pill" data-state="completed">Completed</button>
           <button class="filter-pill" data-state="skipped">Skipped</button>
+          <button class="filter-pill" data-state="paused">Paused</button>
           <button class="filter-pill" data-state="failed">Failed</button>
         </div>
         <div style="display:flex; gap:0.75rem; align-items:center;">
@@ -468,6 +469,50 @@
       <div class="modal-footer">
         <button class="btn btn-secondary modal-close">Cancel</button>
         <button id="btn-save-preset-dialog" class="btn btn-primary">Save Preset</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Queue Priority Modal -->
+  <div id="modal-priority" class="modal-backdrop">
+    <div class="modal" style="max-width: 440px;">
+      <div class="modal-header">
+        <h3 style="font-size:1.1rem; font-weight:700;" id="modal-priority-title">Imposta Priorità Coda</h3>
+        <button class="btn btn-secondary btn-sm modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.85rem; color:var(--text-secondary); margin-bottom:1.25rem;">
+          I file con valore di priorità più elevato vengono presi in carico ed elaborati per primi dai worker (Default: 50).
+        </p>
+
+        <label class="form-label" style="margin-bottom:0.5rem;">Preimpostazioni rapide:</label>
+        <div class="priority-presets-grid">
+          <button type="button" class="priority-preset-btn" data-priority="100">
+            <span class="prio-tag prio-urgent">100</span>
+            <span class="prio-label">Urgente</span>
+          </button>
+          <button type="button" class="priority-preset-btn" data-priority="75">
+            <span class="prio-tag prio-high">75</span>
+            <span class="prio-label">Alta</span>
+          </button>
+          <button type="button" class="priority-preset-btn active" data-priority="50">
+            <span class="prio-tag prio-normal">50</span>
+            <span class="prio-label">Normale</span>
+          </button>
+          <button type="button" class="priority-preset-btn" data-priority="25">
+            <span class="prio-tag prio-low">25</span>
+            <span class="prio-label">Bassa</span>
+          </button>
+        </div>
+
+        <div class="form-group" style="margin-top:1.25rem;">
+          <label class="form-label" for="priority-custom-input">Valore numerico (1 - 1000):</label>
+          <input type="number" id="priority-custom-input" class="form-control" min="1" max="1000" value="50">
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close">Annulla</button>
+        <button id="btn-save-priority-dialog" class="btn btn-primary">Salva Priorità</button>
       </div>
     </div>
   </div>

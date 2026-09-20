@@ -178,12 +178,39 @@ func runDaemon(args []string) {
 
 	scannerCtx, scannerCancel := context.WithCancel(context.Background())
 	go func() {
+		// 1. Initial filesystem scan
 		slog.Info("Running initial filesystem scan")
 		report, err := scanner.ScanScopes(scannerCtx)
 		if err != nil {
 			slog.Warn("Filesystem scan error", "err", err)
 		} else {
 			slog.Info("Filesystem scan completed", "accepted", report.Accepted, "duplicates", report.Duplicates)
+		}
+
+		// 2. Periodic background watcher loop
+		interval := cfg.Filesystem.ScanInterval
+		if interval <= 0 {
+			interval = 20 * time.Second
+		}
+
+		slog.Info("Filesystem periodic watcher active", "interval", interval.String())
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-scannerCtx.Done():
+				return
+			case <-ticker.C:
+				slog.Debug("Running periodic filesystem scan", "interval", interval.String())
+				rep, err := scanner.ScanScopes(scannerCtx)
+				if err != nil && scannerCtx.Err() == nil {
+					slog.Warn("Periodic filesystem scan error", "err", err)
+				} else if rep != nil && rep.Accepted > 0 {
+					slog.Info("Periodic filesystem scan discovered new media", "accepted", rep.Accepted, "duplicates", rep.Duplicates)
+					workerPool.TriggerPrefetch()
+				}
+			}
 		}
 	}()
 
@@ -197,10 +224,15 @@ func runDaemon(args []string) {
 			slog.Info("Triggering manual filesystem scan via Web UI")
 			scanCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 			defer cancel()
-			_, _ = scanner.ScanScopes(scanCtx)
+			rep, _ := scanner.ScanScopes(scanCtx)
+			if rep != nil && rep.Accepted > 0 {
+				workerPool.TriggerPrefetch()
+			}
 		},
 	)
 	webServer.SetProgressTracker(progressTracker)
+	webServer.SetOnCancelJob(workerPool.CancelJob)
+	webServer.SetOnTriggerPrefetch(workerPool.TriggerPrefetch)
 	webServer.Start()
 
 	// 8. Graceful Shutdown Coordinator

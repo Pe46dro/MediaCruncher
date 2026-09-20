@@ -14,6 +14,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Database.BusyTimeout != 5000 {
 		t.Fatalf("expected default busy timeout 5000, got %d", cfg.Database.BusyTimeout)
 	}
+	if cfg.Filesystem.ScanInterval <= 0 {
+		t.Fatalf("expected positive default scan interval, got %v", cfg.Filesystem.ScanInterval)
+	}
 }
 
 func TestLoadYAMLAndEnv(t *testing.T) {
@@ -24,6 +27,8 @@ func TestLoadYAMLAndEnv(t *testing.T) {
 database:
   path: "test.db"
   busy_timeout: 3000
+filesystem:
+  scan_interval: "20s"
 concurrency:
   worker_count: 8
   gpu_semaphore_limit: 3

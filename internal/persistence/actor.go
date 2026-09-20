@@ -403,7 +403,7 @@ func (e *Engine) GetQueueCounts() (pending, leased, completed, failed int64, err
 			pending += count
 		case StateLeased, StateProcessing, StateEvaluating, StateTranscoding:
 			leased += count
-		case StateCompleted, StateSkipped:
+		case StateCompleted, StateSkipped, StatePaused:
 			completed += count
 		case StateFailed, StateQualityFailed, StatePermanentlyFailed:
 			failed += count
@@ -551,6 +551,52 @@ func (e *Engine) RequeueJob(id int64) error {
 	return err
 }
 
+// PauseJob sets a job to paused state so it is excluded from worker prefetching.
+func (e *Engine) PauseJob(id int64) error {
+	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		query := `
+		UPDATE queue_entries 
+		SET state = ?, error_message = 'Paused by user', worker_id = NULL, leased_at = NULL, lease_expires_at = NULL
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query, StatePaused, id)
+		return nil, err
+	})
+	return err
+}
+
+// IgnoreJob marks a job as skipped ("Manually excluded by user") so that the periodic scanner does not re-enqueue it.
+func (e *Engine) IgnoreJob(id int64) error {
+	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		query := `
+		UPDATE queue_entries 
+		SET state = ?, error_message = 'Manually excluded by user', worker_id = NULL, leased_at = NULL, lease_expires_at = NULL
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query, StateSkipped, id)
+		return nil, err
+	})
+	return err
+}
+
+// SetJobPriority updates the priority of a job in the queue.
+func (e *Engine) SetJobPriority(id int64, priority int) error {
+	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
+		query := `
+		UPDATE queue_entries 
+		SET priority = ?, 
+		    state = CASE WHEN state = 'leased' THEN 'pending' ELSE state END,
+		    worker_id = CASE WHEN state = 'leased' THEN NULL ELSE worker_id END,
+		    leased_at = CASE WHEN state = 'leased' THEN NULL ELSE leased_at END,
+		    lease_expires_at = CASE WHEN state = 'leased' THEN NULL ELSE lease_expires_at END
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query, priority, id)
+		return nil, err
+	})
+	return err
+}
+
 // DeleteJob permanently removes a job from the queue.
 func (e *Engine) DeleteJob(id int64) error {
 	_, err := e.execWrite(func(tx *sql.Tx) (any, error) {
@@ -560,3 +606,4 @@ func (e *Engine) DeleteJob(id int64) error {
 	})
 	return err
 }
+

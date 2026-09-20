@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -35,6 +36,7 @@ type WorkerPool struct {
 	activeWorkers atomic.Int64
 	inFlight      sync.Map // entryID -> context.CancelFunc
 	onEvent       EventCallback
+	wakeCh        chan struct{}
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
 	running       atomic.Bool
@@ -64,17 +66,37 @@ func NewWorkerPool(
 		gpuSem:       NewSemaphore(cfg.GPUSemaphoreLimit),
 		cpuSem:       NewSemaphore(cfg.CPUSemaphoreLimit),
 		onEvent:      onEvent,
+		wakeCh:       make(chan struct{}, 1),
 		stopCh:       make(chan struct{}),
 	}
 }
 
-// Start launches the prefetcher and configured number of worker routines.
+// Start launches the background lease monitor and configured number of worker routines.
 func (wp *WorkerPool) Start(ctx context.Context) {
 	if !wp.running.CompareAndSwap(false, true) {
 		return
 	}
 
-	wp.prefetcher.Start(ctx)
+	// Immediate initial orphan recovery on boot: resets any previous crashed/interrupted jobs back to pending
+	_, _ = wp.db.ResetInFlightJobs()
+
+	// Background ticker for recovering expired leases
+	wp.wg.Add(1)
+	go func() {
+		defer wp.wg.Done()
+		ticker := time.NewTicker(3 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wp.stopCh:
+				return
+			case <-ticker.C:
+				_, _ = wp.db.RecoverOrphanedLeases()
+			}
+		}
+	}()
 
 	numWorkers := wp.cfg.WorkerCount
 	if numWorkers <= 0 {
@@ -92,9 +114,26 @@ func (wp *WorkerPool) SetProgressTracker(tracker *transcoder.ProgressTracker) {
 	wp.tracker = tracker
 }
 
-// TriggerPrefetch nudges the prefetcher to check for newly enqueued items immediately.
+// CancelJob cancels an in-flight job if currently running.
+func (wp *WorkerPool) CancelJob(entryID int64) bool {
+	if val, ok := wp.inFlight.Load(entryID); ok {
+		if cancel, ok := val.(context.CancelFunc); ok {
+			cancel()
+			return true
+		}
+	}
+	return false
+}
+
+// TriggerPrefetch nudges workers to check for newly enqueued or reprioritized items immediately.
 func (wp *WorkerPool) TriggerPrefetch() {
-	wp.prefetcher.Trigger()
+	if wp.prefetcher != nil {
+		wp.prefetcher.Trigger()
+	}
+	select {
+	case wp.wakeCh <- struct{}{}:
+	default:
+	}
 }
 
 // DrainAndStop initiates graceful draining of in-flight jobs up to timeout.
@@ -104,7 +143,9 @@ func (wp *WorkerPool) DrainAndStop(timeout time.Duration) {
 	}
 
 	close(wp.stopCh)
-	wp.prefetcher.Stop()
+	if wp.prefetcher != nil {
+		wp.prefetcher.Stop()
+	}
 
 	// Wait for in-flight tasks with timeout
 	done := make(chan struct{})
@@ -132,20 +173,49 @@ func (wp *WorkerPool) DrainAndStop(timeout time.Duration) {
 func (wp *WorkerPool) workerRoutine(parentCtx context.Context, workerID int) {
 	defer wp.wg.Done()
 
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
 	for {
 		select {
 		case <-parentCtx.Done():
 			return
 		case <-wp.stopCh:
 			return
-		case entry, ok := <-wp.prefetcher.Queue():
-			if !ok {
-				return
-			}
-			wp.activeWorkers.Add(1)
-			wp.processEntry(parentCtx, entry)
-			wp.activeWorkers.Add(-1)
+		default:
 		}
+
+		// Just-In-Time Leasing: Atomically lease the single highest-priority pending job in SQLite right now!
+		entries, err := wp.db.LeaseBatch(fmt.Sprintf("worker-%d", workerID), 1, 30*time.Minute)
+		if err != nil {
+			slog.Error("Failed to lease job for worker", "worker", workerID, "err", err)
+			select {
+			case <-parentCtx.Done():
+				return
+			case <-wp.stopCh:
+				return
+			case <-time.After(1 * time.Second):
+				continue
+			}
+		}
+
+		if len(entries) == 0 {
+			// No pending jobs available; wait for trigger, stop, or periodic polling tick
+			select {
+			case <-parentCtx.Done():
+				return
+			case <-wp.stopCh:
+				return
+			case <-wp.wakeCh:
+			case <-ticker.C:
+			}
+			continue
+		}
+
+		entry := entries[0]
+		wp.activeWorkers.Add(1)
+		wp.processEntry(parentCtx, entry)
+		wp.activeWorkers.Add(-1)
 	}
 }
 
@@ -376,6 +446,11 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 }
 
 func (wp *WorkerPool) handleFailure(entry *persistence.QueueEntry, err error) {
+	if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
+		slog.Info("Job was canceled or interrupted, skipping failure handling", "id", entry.ID)
+		return
+	}
+
 	metrics := observability.GetMetrics()
 	metrics.JobsFailedTotal.Add(1)
 

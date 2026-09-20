@@ -557,6 +557,12 @@ body {
   border: 1px solid rgba(148, 163, 184, 0.3);
 }
 
+.badge-paused {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
 /* ==========================================================================
    Queue View
    ========================================================================== */
@@ -974,4 +980,100 @@ pre {
   70% { box-shadow: 0 0 0 6px rgba(244, 63, 94, 0); }
   100% { box-shadow: 0 0 0 0 rgba(244, 63, 94, 0); }
 }
+
+/* ==========================================================================
+   Queue Priority UI Controls
+   ========================================================================== */
+.priority-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(99, 102, 241, 0.12);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  border-radius: var(--radius-full);
+  padding: 2px 8px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.priority-pill:hover {
+  background: rgba(99, 102, 241, 0.25);
+  border-color: var(--accent-primary);
+  color: #ffffff;
+  transform: translateY(-1px);
+}
+
+.priority-presets-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+  margin-top: 0.5rem;
+}
+
+.priority-preset-btn {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-family: inherit;
+  transition: all var(--transition-fast);
+  text-align: left;
+}
+
+.priority-preset-btn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.priority-preset-btn.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 10px rgba(99, 102, 241, 0.25);
+}
+
+.prio-tag {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: var(--radius-full);
+}
+
+.prio-urgent {
+  background: rgba(244, 63, 94, 0.2);
+  color: #fda4af;
+  border: 1px solid rgba(244, 63, 94, 0.4);
+}
+
+.prio-high {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fcd34d;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.prio-normal {
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+  border: 1px solid rgba(99, 102, 241, 0.4);
+}
+
+.prio-low {
+  background: rgba(148, 163, 184, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.3);
+}
+
+.prio-label {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
 

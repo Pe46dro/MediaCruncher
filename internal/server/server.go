@@ -27,8 +27,10 @@ type Server struct {
 	cfgMgr         *config.Manager
 	db             *persistence.Engine
 	metrics        *observability.Metrics
-	onTriggerScan  func()
-	tracker        *transcoder.ProgressTracker
+	onTriggerScan     func()
+	tracker           *transcoder.ProgressTracker
+	onCancelJob       func(int64) bool
+	onTriggerPrefetch func()
 }
 
 func NewServer(
@@ -114,6 +116,16 @@ func (s *Server) Start() {
 // SetProgressTracker attaches an active progress tracker for real-time queue telemetry.
 func (s *Server) SetProgressTracker(t *transcoder.ProgressTracker) {
 	s.tracker = t
+}
+
+// SetOnCancelJob sets the callback to abort an in-flight job execution.
+func (s *Server) SetOnCancelJob(fn func(int64) bool) {
+	s.onCancelJob = fn
+}
+
+// SetOnTriggerPrefetch sets the callback to nudge workers when jobs are requeued or prioritized.
+func (s *Server) SetOnTriggerPrefetch(fn func()) {
+	s.onTriggerPrefetch = fn
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -351,6 +363,81 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 		if err := s.db.RequeueJob(id); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+		if s.onTriggerPrefetch != nil {
+			s.onTriggerPrefetch()
+		}
+		w.WriteHeader(http.StatusOK)
+
+	case "pause":
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.onCancelJob != nil {
+			s.onCancelJob(id)
+		}
+		if err := s.db.PauseJob(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if s.tracker != nil {
+			s.tracker.Remove(id)
+		}
+		w.WriteHeader(http.StatusOK)
+
+	case "ignore":
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.onCancelJob != nil {
+			s.onCancelJob(id)
+		}
+		if err := s.db.IgnoreJob(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if s.tracker != nil {
+			s.tracker.Remove(id)
+		}
+		w.WriteHeader(http.StatusOK)
+
+	case "priority":
+		if r.Method != http.MethodPost && r.Method != http.MethodPut {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var priority int
+		if pStr := r.URL.Query().Get("priority"); pStr != "" {
+			var parseErr error
+			priority, parseErr = strconv.Atoi(pStr)
+			if parseErr != nil {
+				http.Error(w, "Invalid priority parameter", http.StatusBadRequest)
+				return
+			}
+		} else {
+			var body struct {
+				Priority int `json:"priority"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "Invalid JSON body", http.StatusBadRequest)
+				return
+			}
+			priority = body.Priority
+		}
+
+		if priority < 1 || priority > 1000 {
+			http.Error(w, "Priority must be between 1 and 1000", http.StatusBadRequest)
+			return
+		}
+
+		if err := s.db.SetJobPriority(id, priority); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if s.onTriggerPrefetch != nil {
+			s.onTriggerPrefetch()
 		}
 		w.WriteHeader(http.StatusOK)
 
