@@ -114,8 +114,14 @@ func runDaemon(args []string) {
 	}
 
 	// 3. Evaluation & Transcoding Engines
+	progressTracker := transcoder.NewProgressTracker()
 	evalPipeline := evaluation.NewPipeline(cfg.Evaluation)
 	tc := transcoder.NewTranscoder(cfg.Transcoder, func(prog transcoder.TranscodeProgress) {
+		var qID int64
+		fmt.Sscanf(prog.JobID, "job-%d", &qID)
+		if qID > 0 {
+			progressTracker.UpdateTranscode(qID, prog)
+		}
 		slog.Debug("Transcode progress",
 			"job_id", prog.JobID,
 			"pct", fmt.Sprintf("%.1f%%", prog.Percentage),
@@ -123,6 +129,13 @@ func runDaemon(args []string) {
 			"speed", fmt.Sprintf("%.2fx", prog.Speed),
 			"time", fmt.Sprintf("%.1fs/%.1fs", prog.CurrentSec, prog.TotalSec),
 		)
+	})
+	tc.SetVMAFProgressCallback(func(jobID string, current, total int) {
+		var qID int64
+		fmt.Sscanf(jobID, "job-%d", &qID)
+		if qID > 0 {
+			progressTracker.UpdateVMAF(qID, current, total)
+		}
 	})
 
 	// 4. Notification Engine
@@ -140,6 +153,7 @@ func runDaemon(args []string) {
 			notifEngine.Dispatch(event, payload)
 		},
 	)
+	workerPool.SetProgressTracker(progressTracker)
 
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	workerPool.Start(workerCtx)
@@ -186,6 +200,7 @@ func runDaemon(args []string) {
 			_, _ = scanner.ScanScopes(scanCtx)
 		},
 	)
+	webServer.SetProgressTracker(progressTracker)
 	webServer.Start()
 
 	// 8. Graceful Shutdown Coordinator

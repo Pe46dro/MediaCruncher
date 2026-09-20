@@ -38,6 +38,7 @@ type WorkerPool struct {
 	stopCh        chan struct{}
 	wg            sync.WaitGroup
 	running       atomic.Bool
+	tracker       *transcoder.ProgressTracker
 }
 
 func NewWorkerPool(
@@ -84,6 +85,11 @@ func (wp *WorkerPool) Start(ctx context.Context) {
 		wp.wg.Add(1)
 		go wp.workerRoutine(ctx, i)
 	}
+}
+
+// SetProgressTracker attaches an in-memory progress tracker for live telemetry.
+func (wp *WorkerPool) SetProgressTracker(tracker *transcoder.ProgressTracker) {
+	wp.tracker = tracker
 }
 
 // TriggerPrefetch nudges the prefetcher to check for newly enqueued items immediately.
@@ -148,6 +154,9 @@ func (wp *WorkerPool) processEntry(parentCtx context.Context, entry *persistence
 	wp.inFlight.Store(entry.ID, cancel)
 	defer func() {
 		wp.inFlight.Delete(entry.ID)
+		if wp.tracker != nil {
+			wp.tracker.Remove(entry.ID)
+		}
 		cancel()
 	}()
 
@@ -168,6 +177,9 @@ func (wp *WorkerPool) processEntry(parentCtx context.Context, entry *persistence
 	}
 
 	// 1. Stage: Evaluation
+	if wp.tracker != nil {
+		wp.tracker.SetPhase(entry.ID, transcoder.PhaseEvaluating, "Probing audio/video streams & decision rules")
+	}
 	if err := wp.db.UpdateJobState(entry.ID, persistence.StateEvaluating, ""); err != nil {
 		slog.Error("Failed to update job state to evaluating", "id", entry.ID, "err", err)
 	}
@@ -278,9 +290,13 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 	// If preset or system uses hardware acceleration, acquire GPU semaphore
 	// Check hardware acceleration availability
 	hwProfile := transcoder.DetectHardwareCapabilities(ctx)
-	_, isHW := hwProfile.SelectEncoder(preset.VideoCodec, "auto")
+	encoder, isHW := hwProfile.SelectEncoder(preset.VideoCodec, "auto")
 	if isHW {
 		sem = wp.gpuSem
+	}
+
+	if wp.tracker != nil {
+		wp.tracker.SetPhase(entry.ID, transcoder.PhaseTranscoding, "Awaiting worker semaphore ("+preset.Name+")")
 	}
 
 	if err := sem.Acquire(ctx); err != nil {
@@ -288,6 +304,10 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 		return
 	}
 	defer sem.Release()
+
+	if wp.tracker != nil {
+		wp.tracker.SetPhase(entry.ID, transcoder.PhaseTranscoding, preset.Name+" ("+encoder+")")
+	}
 
 	// Track active worker gauge in metrics
 	metrics := observability.GetMetrics()

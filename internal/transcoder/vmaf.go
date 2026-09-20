@@ -25,7 +25,7 @@ var (
 )
 
 // RunQualityVerification performs high-throughput stratified segment VMAF verification.
-func RunQualityVerification(ctx context.Context, origFile, transFile string, duration float64, threshold float64, sampleCount, sampleDur int) (*VerificationResult, error) {
+func RunQualityVerification(ctx context.Context, origFile, transFile string, duration float64, threshold float64, sampleCount, sampleDur int, onProgress ...func(current, total int)) (*VerificationResult, error) {
 	if threshold <= 0 {
 		threshold = 93.0
 	}
@@ -34,6 +34,11 @@ func RunQualityVerification(ctx context.Context, origFile, transFile string, dur
 	}
 	if sampleDur <= 0 {
 		sampleDur = 30
+	}
+
+	var onProg func(current, total int)
+	if len(onProgress) > 0 && onProgress[0] != nil {
+		onProg = onProgress[0]
 	}
 
 	result := &VerificationResult{
@@ -62,7 +67,10 @@ func RunQualityVerification(ctx context.Context, origFile, transFile string, dur
 	}
 
 	var scores []float64
-	for _, p := range percentiles {
+	for i, p := range percentiles {
+		if onProg != nil {
+			onProg(i+1, len(percentiles))
+		}
 		startTime := duration * p
 		if startTime < 0 {
 			startTime = 0

@@ -86,6 +86,13 @@ func TestServerEndpoints(t *testing.T) {
 	if wQueue.Code != http.StatusOK {
 		t.Fatalf("expected 200 for /api/queue, got %d", wQueue.Code)
 	}
+	var queueResp map[string]any
+	if err := json.Unmarshal(wQueue.Body.Bytes(), &queueResp); err != nil {
+		t.Fatalf("failed to decode /api/queue JSON: %v", err)
+	}
+	if _, ok := queueResp["active_progress"]; !ok {
+		t.Errorf("expected 'active_progress' field in /api/queue response")
+	}
 
 	// 5. Test API Config GET & POST
 	reqGetCfg := httptest.NewRequest(http.MethodGet, "/api/config", nil)

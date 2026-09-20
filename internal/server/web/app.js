@@ -485,13 +485,13 @@ async function fetchQueue(silent = false) {
     const res = await fetch(url);
     if (!res.ok) return;
     const data = await res.json();
-    renderQueueTable(data.entries, data.job_stats || {});
+    renderQueueTable(data.entries, data.job_stats || {}, data.active_progress || {});
   } catch (e) {
     if (!silent) console.error("Failed to fetch queue:", e);
   }
 }
 
-function renderQueueTable(entries, jobStats = {}) {
+function renderQueueTable(entries, jobStats = {}, activeProgress = {}) {
   const tbody = document.getElementById("queue-table-body");
   if (!tbody) return;
   tbody.innerHTML = "";
@@ -537,6 +537,72 @@ function renderQueueTable(entries, jobStats = {}) {
       resultHTML = `<span style="color:var(--text-muted); font-size:0.75rem;">${escapeHtml(entry.error_message || "Rule / Size protection")}</span>`;
     } else if (entry.state === "failed" || entry.state === "permanently_failed") {
       resultHTML = `<span style="color:var(--accent-rose); font-size:0.75rem; max-width:200px; display:inline-block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(entry.error_message)}">${escapeHtml(entry.error_message || "Execution error")}</span>`;
+    } else {
+      // Active states: transcoding, evaluating, leased, processing
+      const prog = activeProgress ? activeProgress[entry.id] : null;
+      if (prog) {
+        if (prog.phase === "evaluating") {
+          resultHTML = `
+            <div class="queue-progress-box">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span class="badge-eval-pill">Evaluating</span>
+                <span style="font-size:0.72rem; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;" title="${escapeHtml(prog.phase_detail || '')}">${escapeHtml(prog.phase_detail || 'Probing streams...')}</span>
+              </div>
+            </div>
+          `;
+        } else if (prog.phase === "verifying_vmaf") {
+          resultHTML = `
+            <div class="queue-progress-box">
+              <div class="queue-telemetry-primary">
+                <span class="badge-vmaf-pill">VMAF Check</span>
+                <span style="color:var(--accent-cyan); font-weight:600; font-size:0.75rem;">${prog.percentage.toFixed(1)}%</span>
+              </div>
+              <div class="queue-progress-bar-wrap">
+                <div class="queue-progress-bar-fill vmaf ${prog.is_stuck ? 'stuck' : ''}" style="width:${Math.min(100, Math.max(5, prog.percentage))}%"></div>
+              </div>
+              <div class="queue-telemetry-sub" title="${escapeHtml(prog.phase_detail || '')}">
+                <span>${escapeHtml(prog.phase_detail || 'Quality scoring...')}</span>
+              </div>
+              ${prog.is_stuck ? `<div class="badge-stuck" title="No telemetry for ${prog.stuck_duration_sec}s">⚠️ STUCK (${prog.stuck_duration_sec}s)</div>` : ''}
+            </div>
+          `;
+        } else if (prog.phase === "promoting") {
+          resultHTML = `
+            <div class="queue-progress-box">
+              <span style="color:var(--accent-emerald); font-size:0.75rem; font-weight:600;">📦 Finalizing file...</span>
+            </div>
+          `;
+        } else {
+          // Transcoding phase
+          const etaStr = prog.eta_seconds > 0 ? formatETA(prog.eta_seconds) : '--';
+          const speedStr = prog.speed > 0 ? `${prog.speed.toFixed(2)}x` : '';
+          const fpsStr = prog.fps > 0 ? `${Math.round(prog.fps)} fps` : '';
+          const subInfo = [speedStr, fpsStr, prog.bitrate].filter(Boolean).join(" • ");
+
+          resultHTML = `
+            <div class="queue-progress-box">
+              <div class="queue-telemetry-primary">
+                <span style="color:var(--accent-amber); font-weight:700;">${prog.percentage.toFixed(1)}%</span>
+                <span style="color:var(--text-secondary); font-size:0.72rem;">ETA: <strong style="color:var(--text-primary);">${etaStr}</strong></span>
+              </div>
+              <div class="queue-progress-bar-wrap">
+                <div class="queue-progress-bar-fill ${prog.is_stuck ? 'stuck' : ''}" style="width:${Math.min(100, Math.max(3, prog.percentage))}%"></div>
+              </div>
+              <div class="queue-telemetry-sub" title="${escapeHtml(prog.phase_detail || '')}">
+                <span>${subInfo || escapeHtml(prog.phase_detail || 'Encoding...')}</span>
+              </div>
+              ${prog.is_stuck ? `<div class="badge-stuck" title="No frames received for ${prog.stuck_duration_sec}s">⚠️ STUCK (${prog.stuck_duration_sec}s)</div>` : ''}
+            </div>
+          `;
+        }
+      } else {
+        resultHTML = `
+          <span class="badge-init-pill">
+            <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background:#fbbf24;"></span>
+            Initializing...
+          </span>
+        `;
+      }
     }
 
     tr.innerHTML = `
@@ -589,7 +655,44 @@ async function viewJobDetails(id) {
       } catch (err) {}
     }
 
+    let liveTelemetryHTML = "";
+    if (data.progress) {
+      const p = data.progress;
+      const etaStr = p.eta_seconds > 0 ? formatETA(p.eta_seconds) : '--';
+      liveTelemetryHTML = `
+        <div class="modal-live-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.6rem;">
+            <div style="display:flex; align-items:center; gap:8px;">
+              <span class="badge badge-transcoding" style="font-size:0.72rem;">ACTIVE: ${escapeHtml(p.phase.toUpperCase())}</span>
+              <span style="font-size:0.8rem; color:var(--text-secondary);">${escapeHtml(p.phase_detail || '')}</span>
+            </div>
+            ${p.is_stuck ? 
+              `<span class="badge-stuck">⚠️ STUCK? (${p.stuck_duration_sec}s silence)</span>` : 
+              `<span style="font-size:0.75rem; color:var(--accent-emerald); display:inline-flex; align-items:center; gap:4px;"><span style="display:inline-block; width:7px; height:7px; border-radius:50%; background:#10b981;"></span> Streaming Live Telemetry</span>`}
+          </div>
+          <div style="margin-bottom:0.75rem;">
+            <div style="display:flex; justify-content:space-between; font-size:0.8rem; font-weight:600; margin-bottom:4px;">
+              <span style="color:var(--accent-amber);">${p.percentage.toFixed(1)}% Completed</span>
+              <span>Estimated Time Remaining: <strong style="color:var(--text-primary);">${etaStr}</strong></span>
+            </div>
+            <div class="queue-progress-bar-wrap" style="height:7px;">
+              <div class="queue-progress-bar-fill ${p.phase === 'verifying_vmaf' ? 'vmaf' : ''} ${p.is_stuck ? 'stuck' : ''}" style="width:${Math.min(100, Math.max(3, p.percentage))}%"></div>
+            </div>
+          </div>
+          <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap:0.6rem; font-size:0.78rem;">
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">SPEED</span><br><strong>${p.speed > 0 ? p.speed.toFixed(2) + 'x' : '--'}</strong></div>
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">CURRENT FPS</span><br><strong>${p.fps > 0 ? Math.round(p.fps) : '--'}</strong></div>
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">ELAPSED</span><br><strong>${formatDuration(p.current_sec)}</strong></div>
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">TOTAL DURATION</span><br><strong>${formatDuration(p.total_sec)}</strong></div>
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">BITRATE</span><br><strong>${escapeHtml(p.bitrate || '--')}</strong></div>
+            <div><span style="color:var(--text-muted); font-size:0.7rem;">FRAMES</span><br><strong>${p.frames ? p.frames.toLocaleString() : '--'}</strong></div>
+          </div>
+        </div>
+      `;
+    }
+
     content.innerHTML = `
+      ${liveTelemetryHTML}
       <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-bottom:1rem;">
         <div>
           <p style="font-size:0.78rem; color:var(--text-muted);">FULL FILE PATH</p>
@@ -963,6 +1066,33 @@ function formatBytes(b) {
   const exp = Math.floor(Math.log(b) / Math.log(unit));
   const pre = "KMGTPE"[exp - 1];
   return (b / Math.pow(unit, exp)).toFixed(2) + " " + pre + "B";
+}
+
+function formatDuration(sec) {
+  if (!sec || sec < 0) return "00:00";
+  const s = Math.floor(sec);
+  const m = Math.floor(s / 60);
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  const remS = s % 60;
+  if (h > 0) {
+    return `${h}:${String(remM).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
+  }
+  return `${String(remM).padStart(2, '0')}:${String(remS).padStart(2, '0')}`;
+}
+
+function formatETA(sec) {
+  if (sec === undefined || sec === null || sec < 0) return "--";
+  if (sec === 0) return "Done";
+  if (sec < 60) return `~${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) {
+    return s > 0 ? `~${m}m ${s}s` : `~${m}m`;
+  }
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return `~${h}h ${remM}m`;
 }
 
 function escapeHtml(str) {

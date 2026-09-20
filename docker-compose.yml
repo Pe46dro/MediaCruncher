@@ -47,13 +47,13 @@ services:
 
     # Hardware Acceleration Configurations:
     # 1. NVIDIA NVENC (default active reservation):
-    #deploy:
-    #  resources:
-    #    reservations:
-    #      devices:
-    #        - driver: nvidia
-    #          count: all
-    #          capabilities: [gpu, video]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video]
 
     # 2. Intel GPU (QuickSync / QSV) & AMD (VAAPI) on Linux / WSL2:
     # Uncomment the devices section below to pass the Intel/AMD GPU render node to Docker:

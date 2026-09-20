@@ -64,9 +64,10 @@ type TranscodeResult struct {
 }
 
 type Transcoder struct {
-	cfg        config.TranscoderConfig
-	hwProfile  *HardwareProfile
-	onProgress func(TranscodeProgress)
+	cfg            config.TranscoderConfig
+	hwProfile      *HardwareProfile
+	onProgress     func(TranscodeProgress)
+	onVMAFProgress func(jobID string, current, total int)
 }
 
 func NewTranscoder(cfg config.TranscoderConfig, onProgress func(TranscodeProgress)) *Transcoder {
@@ -79,6 +80,11 @@ func NewTranscoder(cfg config.TranscoderConfig, onProgress func(TranscodeProgres
 		hwProfile:  hw,
 		onProgress: onProgress,
 	}
+}
+
+// SetVMAFProgressCallback sets the callback for VMAF segment verification progress.
+func (t *Transcoder) SetVMAFProgressCallback(fn func(jobID string, current, total int)) {
+	t.onVMAFProgress = fn
 }
 
 // GetConfig returns the current transcoder configuration.
@@ -265,6 +271,12 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	reason := "quality verification skipped or passed"
 
 	if t.cfg.VMAFEnabled && job.Duration > 5.0 {
+		var vmafCb func(int, int)
+		if t.onVMAFProgress != nil {
+			vmafCb = func(curr, tot int) {
+				t.onVMAFProgress(job.ID, curr, tot)
+			}
+		}
 		verifyRes, err := RunQualityVerification(
 			ctx,
 			job.SourcePath,
@@ -273,6 +285,7 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 			t.cfg.VMAFThreshold,
 			t.cfg.VMAFSampleCount,
 			t.cfg.VMAFSampleDuration,
+			vmafCb,
 		)
 		if err != nil {
 			reason = fmt.Sprintf("quality verification error: %v", err)

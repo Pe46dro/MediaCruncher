@@ -28,6 +28,7 @@ type Server struct {
 	db             *persistence.Engine
 	metrics        *observability.Metrics
 	onTriggerScan  func()
+	tracker        *transcoder.ProgressTracker
 }
 
 func NewServer(
@@ -108,6 +109,11 @@ func (s *Server) Start() {
 			slog.Error("Web server terminated unexpectedly", "err", err)
 		}
 	}()
+}
+
+// SetProgressTracker attaches an active progress tracker for real-time queue telemetry.
+func (s *Server) SetProgressTracker(t *transcoder.ProgressTracker) {
+	s.tracker = t
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -272,10 +278,18 @@ func (s *Server) handleQueue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	var activeProgress map[int64]*transcoder.ActiveProgress
+	if s.tracker != nil {
+		activeProgress = s.tracker.GetAll()
+	} else {
+		activeProgress = make(map[int64]*transcoder.ActiveProgress)
+	}
+
 	resp := map[string]any{
-		"entries":   filtered,
-		"job_stats": jobStats,
-		"total":     len(filtered),
+		"entries":         filtered,
+		"job_stats":       jobStats,
+		"active_progress": activeProgress,
+		"total":           len(filtered),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
@@ -312,9 +326,15 @@ func (s *Server) handleQueueItem(w http.ResponseWriter, r *http.Request) {
 		}
 		meta, _ := s.db.GetMetadata(id)
 
+		var activeProg *transcoder.ActiveProgress
+		if s.tracker != nil {
+			activeProg = s.tracker.Get(id)
+		}
+
 		resp := map[string]any{
 			"entry":    entry,
 			"metadata": meta,
+			"progress": activeProg,
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
