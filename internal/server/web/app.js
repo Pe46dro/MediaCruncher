@@ -1254,6 +1254,14 @@ function savePreservation() {
 
 function saveAllSettings() {
   try {
+    // Ensure all scope objects exist before setting properties
+    if (!currentConfig.concurrency) currentConfig.concurrency = {};
+    if (!currentConfig.transcoder) currentConfig.transcoder = {};
+    if (!currentConfig.notification) currentConfig.notification = {};
+    if (!currentConfig.observability) currentConfig.observability = {};
+    if (!currentConfig.evaluation) currentConfig.evaluation = {};
+    if (!currentConfig.filesystem) currentConfig.filesystem = {};
+
     // Concurrency
     currentConfig.concurrency.worker_count = parseInt(document.getElementById("cfg-workers").value, 10) || 4;
     currentConfig.concurrency.gpu_semaphore_limit = parseInt(document.getElementById("cfg-gpu-limit").value, 10) || 2;

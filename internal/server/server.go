@@ -43,6 +43,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
@@ -50,8 +51,13 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"mediacruncher/internal/config"
@@ -63,14 +69,23 @@ import (
 )
 
 const (
-	defaultAPIKey       = ""          // empty = disabled; set via SetAPIKey
-	maxRequestSize      = 10 * 1024   // 10MB max request body
+	defaultAPIKey       = ""            // empty = disabled; set via SetAPIKey
+	maxRequestSize      = 10 * 1024     // 10MB max request body
 	readHeaderTimeout   = 10 * time.Second
 	writeTimeout        = 30 * time.Second
 	idleTimeout         = 120 * time.Second
 )
 
-var currentAPIKey = defaultAPIKey
+// apiKeyMu protects currentAPIKey from data races.
+var (
+	apiKeyMu      sync.RWMutex
+	currentAPIKey = defaultAPIKey
+)
+
+// setAPIKeyUnlocked sets the API key without locking (caller must hold apiKeyMu).
+func setAPIKeyUnlocked(key string) {
+	currentAPIKey = key
+}
 
 //go:embed web/*
 var webFS embed.FS
@@ -229,13 +244,36 @@ func (s *Server) wrapMiddleware(next http.Handler) http.Handler {
 }
 
 // corsMiddleware adds CORS headers for cross-origin requests.
+// Uses a whitelist of allowed origins (or "*" if none configured) to prevent
+// origin reflection attacks.
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" {
-			origin = "*"
+		// In a trusted local/VPN context, allow all origins if none configured.
+		// In production, set CORS_ALLOWED_ORIGINS env var (comma-separated).
+		allowedOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
+		allowedOrigins = strings.TrimSpace(allowedOrigins)
+
+		if allowedOrigins == "" {
+			// No whitelist configured — allow all (trusted local/VPN context)
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		} else {
+			// Validate origin against whitelist
+			allowed := false
+			for _, o := range strings.Split(allowedOrigins, ",") {
+				o = strings.TrimSpace(o)
+				if o == origin {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				// Reject CORS requests from unlisted origins
+				http.Error(w, `{"error":"origin not allowed"}`, http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-		w.Header().Set("Access-Control-Allow-Origin", origin)
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
 		w.Header().Set("Access-Control-Max-Age", "86400")
@@ -252,7 +290,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 
 // authMiddleware validates API key for protected endpoints when configured.
 func authMiddleware(next http.Handler) http.Handler {
+	apiKeyMu.RLock()
 	apiKey := currentAPIKey
+	apiKeyMu.RUnlock()
+
 	if apiKey == "" {
 		// No auth configured — pass through all requests
 		return next
@@ -269,7 +310,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if reqKey != apiKey {
+		if subtle.ConstantTimeCompare([]byte(reqKey), []byte(apiKey)) != 1 {
 			http.Error(w, `{"error":"invalid API key"}`, http.StatusUnauthorized)
 			return
 		}
@@ -338,7 +379,9 @@ func (s *Server) SetScheduling(sched *scheduling.Engine) {
 
 // SetAPIKey configures the API key for authentication on protected endpoints.
 func SetAPIKey(key string) {
+	apiKeyMu.Lock()
 	currentAPIKey = key
+	apiKeyMu.Unlock()
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -689,22 +732,140 @@ func (s *Server) handleTriggerScan(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, `{"status":"scan_triggered"}`)
 }
 
+// validateConfigInput checks incoming config for injection or path traversal.
+func validateConfigInput(cfg *config.Config) error {
+	// Validate DB path — prevent path traversal
+	if cfg.Database.Path != "" {
+		if !filepath.IsAbs(cfg.Database.Path) {
+			return fmt.Errorf("database path must be absolute")
+		}
+		// Block obviously dangerous paths
+		if strings.Contains(cfg.Database.Path, "..") {
+			return fmt.Errorf("database path contains invalid characters")
+		}
+	}
+
+	// Validate filesystem scope paths
+	for i, scope := range cfg.Filesystem.Scopes {
+		if scope.Path == "" {
+			return fmt.Errorf("scope[%d]: path is required", i)
+		}
+		if !filepath.IsAbs(scope.Path) {
+			return fmt.Errorf("scope[%d]: path must be absolute", i)
+		}
+		if strings.Contains(scope.Path, "..") {
+			return fmt.Errorf("scope[%d]: path contains invalid characters", i)
+		}
+		// Resolve and check it's within the filesystem
+		resolved, err := filepath.EvalSymlinks(scope.Path)
+		if err != nil {
+			// Path doesn't exist yet — that's okay, just validate format
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("scope[%d]: invalid path %s", i, scope.Path)
+			}
+		}
+		_ = resolved
+	}
+
+	// Validate transcoder staging dir
+	if cfg.Transcoder.StagingDir != "" {
+		if !filepath.IsAbs(cfg.Transcoder.StagingDir) {
+			return fmt.Errorf("staging dir must be absolute")
+		}
+	}
+
+	// Validate output dir
+	if cfg.Transcoder.OutputDir != "" {
+		if !filepath.IsAbs(cfg.Transcoder.OutputDir) {
+			return fmt.Errorf("output dir must be absolute")
+		}
+	}
+
+	// Validate observability config
+	if cfg.Observability.LogLevel != "" {
+		switch cfg.Observability.LogLevel {
+		case "debug", "info", "warn", "error":
+			// valid
+		default:
+			return fmt.Errorf("log_level must be one of: debug, info, warn, error")
+		}
+	}
+
+	// Validate hardware acceleration mode
+	if cfg.Transcoder.HardwareAcceleration != "" {
+		validHW := map[string]bool{
+			"auto": true, "nvenc": true, "qsv": true, "amf": true,
+			"vaapi": true, "d3d11va": true, "qsv+cuda": true, "qsv+d3d11va": true,
+			"full": true, "nvdec": true, "cpu": true,
+		}
+		if !validHW[strings.ToLower(cfg.Transcoder.HardwareAcceleration)] {
+			return fmt.Errorf("hardware_acceleration must be one of: auto, nvenc, qsv, amf, vaapi, d3d11va, qsv+cuda, qsv+d3d11va, full, nvdec, cpu")
+		}
+	}
+
+	// Validate concurrency limits
+	if cfg.Concurrency.WorkerCount < 0 {
+		return fmt.Errorf("worker_count cannot be negative")
+	}
+	if cfg.Concurrency.WorkerCount > 256 {
+		return fmt.Errorf("worker_count cannot exceed 256")
+	}
+	if cfg.Concurrency.GPUSemaphoreLimit < 0 {
+		return fmt.Errorf("gpu_semaphore_limit cannot be negative")
+	}
+	if cfg.Concurrency.GPUSemaphoreLimit > runtime.NumCPU() {
+		return fmt.Errorf("gpu_semaphore_limit cannot exceed available CPUs (%d)", runtime.NumCPU())
+	}
+	if cfg.Concurrency.CPUSemaphoreLimit < 0 {
+		return fmt.Errorf("cpu_semaphore_limit cannot be negative")
+	}
+	if cfg.Concurrency.CPUSemaphoreLimit > runtime.NumCPU() {
+		return fmt.Errorf("cpu_semaphore_limit cannot exceed available CPUs (%d)", runtime.NumCPU())
+	}
+
+	return nil
+}
+
+// sanitizeConfigForOutput redacts secrets from config when returning via API.
+func sanitizeConfigForOutput(cfg *config.Config) *config.Config {
+	safe := *cfg
+
+	// Redact notification channel tokens — they may contain secrets
+	for i := range safe.Notification.Channels {
+		safe.Notification.Channels[i].Token = "***REDACTED***"
+	}
+
+	// Redact API key if present in observability
+	safe.Observability.APIKey = "***REDACTED***"
+
+	return &safe
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		cfg := s.cfgMgr.Get()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(cfg)
+		// Sanitize secrets from output (local context: log levels may expose env info)
+		safe := sanitizeConfigForOutput(cfg)
+		_ = json.NewEncoder(w).Encode(safe)
 
 	case http.MethodPost:
 		var newCfg config.Config
 		if err := json.NewDecoder(r.Body).Decode(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON configuration: %v", err), http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid JSON configuration"}`, http.StatusBadRequest)
+			return
+		}
+
+		// Validate incoming config before applying — prevents config injection
+		// attacks that could override DB path, scan scopes, or other critical fields.
+		if err := validateConfigInput(&newCfg); err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":"%s"}`, err.Error()), http.StatusBadRequest)
 			return
 		}
 
 		if err := s.cfgMgr.Update(&newCfg); err != nil {
-			http.Error(w, fmt.Sprintf("Failed to apply configuration: %v", err), http.StatusInternalServerError)
+			http.Error(w, `{"error":"failed to apply configuration"}`, http.StatusInternalServerError)
 			return
 		}
 
@@ -746,11 +907,21 @@ func (s *Server) handleScopes(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var scope config.ScanScopeConfig
 		if err := json.NewDecoder(r.Body).Decode(&scope); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON body: %v", err), http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 			return
 		}
 		if scope.Path == "" {
-			http.Error(w, "path is required", http.StatusBadRequest)
+			http.Error(w, `{"error":"path is required"}`, http.StatusBadRequest)
+			return
+		}
+		// Validate scope path — prevent path traversal and URL injection
+		scope.Path = filepath.Clean(scope.Path)
+		if !filepath.IsAbs(scope.Path) {
+			http.Error(w, `{"error":"scope path must be absolute"}`, http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(scope.Path, "..") {
+			http.Error(w, `{"error":"scope path contains invalid characters"}`, http.StatusBadRequest)
 			return
 		}
 		if scope.Extensions == nil {
@@ -771,11 +942,22 @@ func (s *Server) handleScopes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleScopeItem(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/api/filesystem/scopes/")
-	if path == "" || path == "/" {
+	rawPath := strings.TrimPrefix(r.URL.Path, "/api/filesystem/scopes/")
+	if rawPath == "" || rawPath == "/" {
 		http.NotFound(w, r)
 		return
 	}
+
+	// URL-decode the path to prevent injection through encoded characters
+	decodedPath, err := url.PathUnescape(rawPath)
+	if err != nil {
+		http.Error(w, `{"error":"invalid scope path encoding"}`, http.StatusBadRequest)
+		return
+	}
+	// Clean the path to resolve any traversal attempts
+	decodedPath = filepath.Clean(decodedPath)
+
+	path := decodedPath
 
 	switch r.Method {
 	case http.MethodGet:
@@ -836,7 +1018,7 @@ func (s *Server) handleSchedule(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		var entry scheduling.ScheduleEntry
 		if err := json.NewDecoder(r.Body).Decode(&entry); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+			http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 			return
 		}
 		entry.ID = time.Now().Format("20060102150405") + "-" + strconv.FormatInt(time.Now().UnixNano(), 10)

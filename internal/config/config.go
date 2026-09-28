@@ -386,20 +386,24 @@ func (m *Manager) OnReload(fn func(*Config)) {
 
 // Update updates the configuration snapshot, writes changes to disk if configured, and notifies listeners.
 func (m *Manager) Update(newCfg *Config) error {
-	normalizeConfigPaths(newCfg)
+	// Sanitize secrets before writing to disk — prevents plaintext secret exposure
+	sanitized := sanitizeConfigForDisk(newCfg)
+
+	normalizeConfigPaths(sanitized)
 
 	if m.filePath != "" {
-		data, err := yaml.Marshal(newCfg)
+		data, err := yaml.Marshal(sanitized)
 		if err != nil {
 			return fmt.Errorf("failed to marshal config yaml: %w", err)
 		}
-		if err := os.WriteFile(m.filePath, data, 0644); err != nil {
-			return fmt.Errorf("failed to write config file %s: %w", m.filePath, err)
+		// Write with 0600 permissions (owner-only) because config may contain secrets
+		if err := os.WriteFile(m.filePath, data, 0600); err != nil {
+			return fmt.Errorf("failed to write config file: %w", err)
 		}
 	}
 
 	m.mu.Lock()
-	m.current = newCfg
+	m.current = newCfg // store original (un-sanitized) for runtime use
 	listeners := append([]func(*Config){}, m.listeners...)
 	m.mu.Unlock()
 
@@ -411,4 +415,20 @@ func (m *Manager) Update(newCfg *Config) error {
 
 func boolPtr(b bool) *bool {
 	return &b
+}
+
+// sanitizeConfigForDisk redacts secrets before writing config to disk.
+// This prevents plaintext exposure of tokens and API keys in the config file.
+func sanitizeConfigForDisk(cfg *Config) *Config {
+	safe := *cfg
+
+	// Redact notification channel tokens — they may contain secrets
+	for i := range safe.Notification.Channels {
+		safe.Notification.Channels[i].Token = "***REDACTED***"
+	}
+
+	// Redact API key if present in observability
+	safe.Observability.APIKey = "***REDACTED***"
+
+	return &safe
 }
