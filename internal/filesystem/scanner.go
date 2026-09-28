@@ -1,3 +1,27 @@
+// Package filesystem implements directory scanning and media file discovery
+// for MediaCruncher.
+//
+// Architecture:
+//
+//	The Scanner walks configured scopes (directories) and pushes discovered
+//	media files into an IngestionBuffer. The buffer decouples scanning from
+//	queuing, allowing the scanner to run at full disk speed while the queue
+//	consumer processes at its own pace.
+//
+// Deduplication integration:
+//	The Scanner receives a shared *dedupe.Index singleton. Each discovered file
+//	is checked through CheckAndRecord() before being pushed to the buffer.
+//	Duplicates are filtered at scan time, reducing queue pressure.
+//
+// Exclusion patterns:
+//	Each scope can specify extensions (accepted) and exclusions (wildcards like
+//	"*.part", "*.tmp", "*tmp*"). Files not matching extensions are skipped;
+//	files matching exclusions are skipped even if they match extensions.
+//
+// Hot scope management:
+//	AddScope() / RemoveScope() allow runtime modification of scan directories.
+//	The REST API endpoints /api/filesystem/scopes expose this for live config
+//	updates without restart.
 package filesystem
 
 import (
@@ -10,6 +34,7 @@ import (
 	"time"
 
 	"mediacruncher/internal/config"
+	"mediacruncher/internal/dedupe"
 	"mediacruncher/internal/observability"
 )
 
@@ -26,17 +51,43 @@ type ScanReport struct {
 type Scanner struct {
 	scopes   []config.ScanScopeConfig
 	buffer   *IngestionBuffer
-	dedupe   *DedupeIndex
+	dedupe   *dedupe.Index
 	metrics  *observability.Metrics
 }
 
-func NewScanner(scopes []config.ScanScopeConfig, buffer *IngestionBuffer) *Scanner {
+// NewScanner creates a Scanner that shares the provided DedupeIndex.
+// The DedupeIndex must be a singleton shared across the daemon lifetime
+// to avoid re-counting already-seen files on each scan cycle.
+func NewScanner(scopes []config.ScanScopeConfig, buffer *IngestionBuffer, dedupeIdx *dedupe.Index) *Scanner {
 	return &Scanner{
 		scopes:  scopes,
 		buffer:  buffer,
-		dedupe:  NewDedupeIndex(),
+		dedupe:  dedupeIdx,
 		metrics: observability.GetMetrics(),
 	}
+}
+
+// AddScope appends a new scope and triggers an immediate scan of it.
+func (s *Scanner) AddScope(scope config.ScanScopeConfig) {
+	s.scopes = append(s.scopes, scope)
+}
+
+// RemoveScope removes a scope by path (case-sensitive match) and returns true if found.
+func (s *Scanner) RemoveScope(path string) bool {
+	for i, scope := range s.scopes {
+		if scope.Path == path {
+			s.scopes = append(s.scopes[:i], s.scopes[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// GetScopes returns a copy of the current scopes (safe for read access).
+func (s *Scanner) GetScopes() []config.ScanScopeConfig {
+	out := make([]config.ScanScopeConfig, len(s.scopes))
+	copy(out, s.scopes)
+	return out
 }
 
 // ScanScopes walks all configured directories and pushes discovered media files into the buffer.

@@ -1,0 +1,99 @@
+database:
+    path: /root/.hermes/cache/scratch/MediaCruncher/test-data/mediacruncher.db
+    busy_timeout: 5000
+filesystem:
+    scan_interval: 10s
+    scopes:
+        - path: /root/.hermes/cache/scratch/MediaCruncher/test-videos
+          extensions:
+            - .mp4
+            - .mkv
+            - .mov
+            - .avi
+          exclusions:
+            - '*.part'
+            - '*.tmp'
+          max_depth: 10
+          follow_symlinks: false
+        - path: /root/.hermes/cache/scratch/MediaCruncher/test-videos
+          extensions:
+            - .mp4
+            - .mkv
+          exclusions: []
+          max_depth: 0
+          follow_symlinks: false
+    ingestion_capacity: 1000
+evaluation:
+    rules:
+        - name: Skip Modern HEVC & AV1
+          priority: 100
+          conditions:
+            codec: hevc,av1
+          action: skip
+          preset: ""
+          audio_action: ""
+          retain_subtitles: false
+        - name: Transcode H.264 to HEVC
+          priority: 50
+          conditions:
+            codec: h264
+          action: transcode
+          preset: balanced-hevc
+          audio_action: copy
+          retain_subtitles: false
+    default_action: transcode
+    default_preset: balanced-hevc
+    codec_aliases:
+        av1: av1
+        av01: av1
+        avc1: h264
+        h264: h264
+        h265: hevc
+        hev1: hevc
+        hevc: hevc
+        vp9: vp9
+    audio_preservation:
+        retain_surround_tracks: true
+        preferred_languages:
+            - eng
+            - ita
+            - und
+        copy_lossless_audio: true
+transcoder:
+    hardware_acceleration: cpu
+    staging_dir: /root/.hermes/cache/scratch/MediaCruncher/test-data/staging
+    vmaf_enabled: false
+    vmaf_threshold: 93
+    vmaf_sample_count: 3
+    vmaf_sample_duration: 30
+    skip_if_larger: true
+    overwrite_source: true
+    output_dir: ""
+    output_suffix: _crunched
+    presets:
+        - name: balanced-hevc
+          video_codec: hevc
+          quality_crf: 28
+          preset_speed: ultrafast
+          audio_codec: copy
+          audio_bitrate: 128k
+          extra_ffmpeg: ""
+    max_job_duration: 1h0m0s
+concurrency:
+    worker_count: 2
+    gpu_semaphore_limit: 0
+    cpu_semaphore_limit: 2
+    prefetch_buffer_depth: 50
+    drain_timeout: 2m0s
+    retry_max_attempts: 1
+    retry_base_interval: 5s
+notification:
+    enabled: false
+    batch_window: 30s
+    batch_max_size: 10
+    rate_limit_per_minute: 30
+    channels: []
+observability:
+    log_level: info
+    metrics_port: 9091
+    log_json: false

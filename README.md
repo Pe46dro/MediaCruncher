@@ -114,6 +114,29 @@ mediacruncher status
 
 ---
 
+## Package Documentation
+
+Comprehensive package-level documentation added to all core packages. Each package doc comment explains architecture, thread safety, lifecycle, and key patterns:
+
+| Package | Purpose | Key Concepts |
+|---------|---------|-------------|
+| `main` | CLI entry point | 6 commands, 10-step daemon lifecycle |
+| `config` | Configuration management | 3-level priority (defaults → YAML → env), 7 env vars, hot-reload |
+| `server` | HTTP API + Web UI | 4-middleware stack, 17 REST endpoints with methods |
+| `scheduling` | Time-based job scheduling | 2 goroutines (processLoop/tickLoop), entry lifecycle, mutex unlock pattern |
+| `shutdown` | Graceful shutdown coordinator | 4 ordered phases, force-kill watchdog, idempotency |
+| `concurrency/worker` | Worker pool | 2 semaphore tiers (CPU/GPU), 7-step job lifecycle, lease recovery, retry |
+| `concurrency/prefetch` | DB-to-worker buffer | Bounded channel, wake-on-notify, 30-min lease expiry |
+| `dedupe` | File deduplication | 2-tier strategy (size → boundary hash), 2MB vs full-file I/O |
+| `filesystem` | Directory scanning | IngestionBuffer decoupling, exclusion wildcards, hot scope management |
+| `persistence` | SQLite persistence | Dual DB connections, WAL pragmas, queue states, lease mechanism |
+| `evaluation` | Media analysis pipeline | 4-stage pipeline (probe → normalize → rule match → stream plan) |
+| `transcoder` | FFmpeg orchestration | Hardware detection, size-growth safety, VMAF/SSIM verification |
+| `notification` | Event notifications | 6 adapter channels, batching/rate-limiting, dead-letter queue |
+| `observability` | Metrics + logging | Singleton + atomic counters, Prometheus + JSON exports, file rotation |
+
+Each doc comment covers: architecture overview, thread safety model, public API surface, and trade-off justification.
+
 ## Architecture Overview
 
 ```mermaid

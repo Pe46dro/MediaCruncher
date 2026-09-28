@@ -1,3 +1,33 @@
+// Package main is the CLI entry point for MediaCruncher.
+//
+// Usage: mediacruncher <command> [arguments]
+//
+// Commands:
+//   daemon      - Start the long-running daemon: filesystem watcher + worker pool + HTTP API
+//   scan        - One-shot scan: walk scopes, deduplicate, enqueue new files
+//   eval        - One-shot evaluation: probe a single media file, output metadata + decision
+//   transcode   - One-shot transcode: evaluate → transcode → verify → promote/skip
+//   status      - Print queue depths and recent audit log entries
+//   version     - Print version string and detected hardware accelerators
+//
+// Configuration:
+//	All commands accept -config <path> to override defaults.
+//	Transcode command supports: -preset <name> -dest <path> -vmaf=true|false
+//
+// Environment variables (daemon):
+//	SAME list as config package — takes highest priority.
+//
+// Main thread execution order (daemon):
+//	1. SetupLogger     → slog initialization (JSON or text, optional file)
+//	2. NewEngine       → SQLite persistence
+//	3. NewPipeline     → evaluation rules engine
+//	4. NewTranscoder   → ffmpeg orchestrator + progress callbacks
+//	5. NewWorkerPool   → concurrency controller (CPU/GPU semaphores, retry)
+//	6. NewScanner      → filesystem watcher with ingestion buffer
+//	7. NewServer       → HTTP API + SPA dashboard (started last, shutdown first)
+//	8. NewCoordinator  → graceful shutdown listener (SIGINT/SIGTERM)
+//	9. signal.Notify    → wait for OS termination signal
+//	10. coord.Execute() → drain workers → persist state → teardown → report
 package main
 
 import (
@@ -13,11 +43,13 @@ import (
 
 	"mediacruncher/internal/concurrency"
 	"mediacruncher/internal/config"
+	"mediacruncher/internal/dedupe"
 	"mediacruncher/internal/evaluation"
 	"mediacruncher/internal/filesystem"
 	"mediacruncher/internal/notification"
 	"mediacruncher/internal/observability"
 	"mediacruncher/internal/persistence"
+	"mediacruncher/internal/scheduling"
 	"mediacruncher/internal/server"
 	"mediacruncher/internal/shutdown"
 	"mediacruncher/internal/transcoder"
@@ -103,7 +135,7 @@ func runDaemon(args []string) {
 	cfg := cfgMgr.Get()
 
 	// 1. Observability
-	observability.InitLogger(cfg.Observability.LogLevel, cfg.Observability.LogJSON)
+	observability.SetupLogger(cfg.Observability.LogLevel, cfg.Observability.LogJSON, "")
 	slog.Info("Starting MediaCruncher Daemon", "version", Version)
 
 	// 2. Persistence
@@ -159,8 +191,11 @@ func runDaemon(args []string) {
 	workerPool.Start(workerCtx)
 
 	// 6. Filesystem Scanner Loop with Bounded Ingestion Buffer
+	//    Create a singleton DedupeIndex shared across all scanner instances
+	//    so files seen in previous scans are not re-counted.
+	dedupeIdx := dedupe.NewIndex()
 	buf := filesystem.NewIngestionBuffer(cfg.Filesystem.IngestionCapacity)
-	scanner := filesystem.NewScanner(cfg.Filesystem.Scopes, buf)
+	scanner := filesystem.NewScanner(cfg.Filesystem.Scopes, buf, dedupeIdx)
 
 	go func() {
 		for rec := range buf.Records() {
@@ -233,6 +268,32 @@ func runDaemon(args []string) {
 	webServer.SetProgressTracker(progressTracker)
 	webServer.SetOnCancelJob(workerPool.CancelJob)
 	webServer.SetOnTriggerPrefetch(workerPool.TriggerPrefetch)
+	webServer.SetDedupeIndex(dedupeIdx)
+
+	// Configure API key authentication
+	server.SetAPIKey(cfg.Observability.APIKey)
+
+	// 7b. Scheduling Engine
+	schedEngine := scheduling.NewEngine(
+		cfg.Scheduling,
+		cfg.Concurrency.WorkerCount,
+		dedupeIdx,
+		db,
+		observability.GetMetrics(),
+	)
+	schedEngine.SetTriggerScan(func() {
+		slog.Info("Scheduling: triggering scan")
+		scanCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		rep, _ := scanner.ScanScopes(scanCtx)
+		if rep != nil && rep.Accepted > 0 {
+			slog.Info("Scheduling: scan discovered media", "accepted", rep.Accepted)
+			workerPool.TriggerPrefetch()
+		}
+	})
+	schedEngine.Start(context.Background())
+	webServer.SetScheduling(schedEngine)
+
 	webServer.Start()
 
 	// 8. Graceful Shutdown Coordinator
@@ -292,8 +353,11 @@ func runScan(args []string) {
 	defer db.Close()
 
 	fmt.Println("Starting filesystem scan across configured scopes...")
+
+	// Use a transient DedupeIndex so each scan is deduplicated
+	dedupeIdx := dedupe.NewIndex()
 	buf := filesystem.NewIngestionBuffer(cfg.Filesystem.IngestionCapacity)
-	scanner := filesystem.NewScanner(cfg.Filesystem.Scopes, buf)
+	scanner := filesystem.NewScanner(cfg.Filesystem.Scopes, buf, dedupeIdx)
 
 	discoveredCount := 0
 	doneCh := make(chan struct{})

@@ -1,3 +1,30 @@
+// Package notification implements an event-driven notification engine for MediaCruncher.
+//
+// Architecture:
+//
+//	The Engine receives NotificationEvents from the worker pool (job completion,
+//	failure, quality check failure) and dispatches them to one or more adapters.
+//	Adapters translate events into platform-specific messages.
+//
+// Supported channels (adapters):
+//   - discord:   Discord webhook (POST to webhook URL)
+//   - telegram:  Telegram Bot API (sendMessage to chat_id)
+//   - slack:     Slack incoming webhook
+//   - webhook:   Generic HTTP POST to any URL
+//   - gotify:    Gotify push notification server
+//   - smtp:      Email via SMTP (Go's net/smtp)
+//
+// Batching:
+//	Events are accumulated in a buffered channel (cap 500) and dispatched in
+//	batches every BatchWindow (default 30s) or when BatchMaxSize (default 10)
+//	is reached. This prevents notification spam during high-throughput scans.
+//
+// Rate limiting:
+//	When RateLimitPerM is set, the engine enforces a maximum number of
+//	notifications per minute per channel, dropping excess events.
+//
+// Event types:
+//	job_completed, job_failed, job_skipped, job_quality_failed, scan_summary
 package notification
 
 import (

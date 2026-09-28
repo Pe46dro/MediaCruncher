@@ -193,6 +193,21 @@ function initControls() {
       });
     });
   }
+
+  // Add scope button
+  const addScopeBtn = document.getElementById("btn-add-scope");
+  if (addScopeBtn) {
+    addScopeBtn.addEventListener("click", addScope);
+  }
+
+  // Custom extensions toggle
+  const extsSelect = document.getElementById("new-scope-exts");
+  const customExtInput = document.getElementById("new-scope-exts-custom");
+  if (extsSelect && customExtInput) {
+    extsSelect.addEventListener("change", () => {
+      customExtInput.style.display = extsSelect.value === "custom" ? "inline-block" : "none";
+    });
+  }
 }
 
 function startPolling() {
@@ -224,7 +239,7 @@ async function fetchStatus() {
     if (!res.ok) return;
     const data = await res.json();
 
-    document.getElementById("stat-scanned").textContent = data.files_scanned.toLocaleString();
+    document.getElementById("stat-scanned").textContent = data.unique_files > 0 ? data.unique_files.toLocaleString() : data.files_scanned.toLocaleString();
     document.getElementById("stat-deduped").textContent = data.deduplicated_files.toLocaleString();
     document.getElementById("stat-completed").textContent = data.jobs_completed.toLocaleString();
     document.getElementById("stat-failed").textContent = data.jobs_failed.toLocaleString();
@@ -978,14 +993,128 @@ function renderConfigForms(cfg) {
     document.getElementById("cfg-hwaccel").value = cfg.transcoder.hardware_acceleration || "auto";
     document.getElementById("cfg-staging-dir").value = cfg.transcoder.staging_dir || "";
     document.getElementById("cfg-vmaf-thresh").value = cfg.transcoder.vmaf_threshold || 93.0;
+    document.getElementById("cfg-vmaf-enabled").checked = cfg.transcoder.vmaf_enabled !== false;
+    document.getElementById("cfg-vmaf-samples").value = cfg.transcoder.vmaf_sample_count || 3;
+    document.getElementById("cfg-vmaf-duration").value = cfg.transcoder.vmaf_sample_duration || 30;
+    document.getElementById("cfg-max-job-duration").value = cfg.transcoder.max_job_duration ? String(cfg.transcoder.max_job_duration) : "4h";
     document.getElementById("cfg-skip-larger").checked = !!cfg.transcoder.skip_if_larger;
     document.getElementById("cfg-overwrite-source").checked = cfg.transcoder.overwrite_source !== false;
     document.getElementById("cfg-output-suffix").value = cfg.transcoder.output_suffix || "_crunched";
     document.getElementById("cfg-output-dir").value = cfg.transcoder.output_dir || "";
   }
 
-  if (cfg.filesystem && cfg.filesystem.scopes) {
-    document.getElementById("cfg-scopes-json").value = JSON.stringify(cfg.filesystem.scopes, null, 2);
+  if (cfg.notification) {
+    document.getElementById("cfg-notif-enabled").checked = !!cfg.notification.enabled;
+    document.getElementById("cfg-notif-batch-window").value = cfg.notification.batch_window ? String(cfg.notification.batch_window) : "30s";
+    document.getElementById("cfg-notif-batch-max").value = cfg.notification.batch_max_size || 10;
+    document.getElementById("cfg-notif-rate-limit").value = cfg.notification.rate_limit_per_minute || 30;
+    document.getElementById("cfg-notif-channels").value = JSON.stringify(cfg.notification.channels || [], null, 2);
+  }
+
+  if (cfg.observability) {
+    document.getElementById("cfg-log-level").value = cfg.observability.log_level || "info";
+    document.getElementById("cfg-metrics-port").value = cfg.observability.metrics_port || 9090;
+    document.getElementById("cfg-log-json").checked = !!cfg.observability.log_json;
+  }
+
+  if (cfg.evaluation) {
+    document.getElementById("cfg-default-action").value = cfg.evaluation.default_action || "transcode";
+    document.getElementById("cfg-default-preset").value = cfg.evaluation.default_preset || "balanced-hevc";
+    document.getElementById("cfg-codec-aliases").value = JSON.stringify(cfg.evaluation.codec_aliases || {}, null, 2);
+  }
+
+  if (cfg.filesystem) {
+    document.getElementById("cfg-scan-interval").value = cfg.filesystem.scan_interval ? String(cfg.filesystem.scan_interval) : "20s";
+    document.getElementById("cfg-ingestion-capacity").value = cfg.filesystem.ingestion_capacity || 5000;
+    // Render scopes list
+    renderScopesList(cfg.filesystem.scopes || []);
+  }
+}
+
+// ==========================================================================
+// Scopes List Rendering
+// ==========================================================================
+
+function renderScopesList(scopes) {
+  const container = document.getElementById("scopes-list");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (!scopes || scopes.length === 0) {
+    container.innerHTML = '<div style="color:var(--text-muted); font-size:0.85rem; padding:0.5rem;">No scopes configured yet.</div>';
+    return;
+  }
+
+  scopes.forEach((scope, idx) => {
+    const card = document.createElement("div");
+    card.className = "stat-card";
+    card.style.marginBottom = "0.5rem";
+    card.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <div>
+          <strong style="color:var(--text-primary);">${escapeHtml(scope.path)}</strong>
+          <span style="color:var(--text-secondary); font-size:0.8rem; margin-left:0.5rem;">[${(scope.extensions || []).join(", ")}]</span>
+        </div>
+        <button class="btn btn-danger btn-sm" onclick="removeScope(${idx})" title="Remove this scope">&times;</button>
+      </div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+async function addScope() {
+  const pathEl = document.getElementById("new-scope-path");
+  const extsEl = document.getElementById("new-scope-exts");
+  const customEl = document.getElementById("new-scope-exts-custom");
+
+  const path = pathEl.value.trim();
+  if (!path) {
+    showToast("Path is required", "error");
+    return;
+  }
+
+  let extensions = [];
+  if (extsEl.value === "custom") {
+    extensions = customEl.value.split(",").map(s => s.trim()).filter(Boolean).map(s => s.startsWith(".") ? s : "." + s);
+  } else {
+    extensions = extsEl.value.split(",").map(s => s.trim()).filter(Boolean).map(s => s.startsWith(".") ? s : "." + s);
+  }
+
+  try {
+    const res = await fetch("/api/filesystem/scopes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, extensions })
+    });
+    if (res.ok) {
+      showToast(`Scope "${path}" added successfully`, "success");
+      pathEl.value = "";
+      fetchConfig(); // reload all config
+    } else {
+      showToast("Failed to add scope", "error");
+    }
+  } catch (e) {
+    showToast("Network error adding scope", "error");
+  }
+}
+
+async function removeScope(idx) {
+  if (!currentConfig || !currentConfig.filesystem || !currentConfig.filesystem.scopes[idx]) return;
+  const scope = currentConfig.filesystem.scopes[idx];
+  if (!confirm(`Remove scope "${scope.path}"?`)) return;
+
+  try {
+    const res = await fetch(`/api/filesystem/scopes/${encodeURIComponent(scope.path)}`, {
+      method: "DELETE"
+    });
+    if (res.ok) {
+      showToast(`Scope "${scope.path}" removed`, "success");
+      fetchConfig(); // reload all config
+    } else {
+      showToast("Failed to remove scope", "error");
+    }
+  } catch (e) {
+    showToast("Network error removing scope", "error");
   }
 }
 
@@ -1125,28 +1254,55 @@ function savePreservation() {
 
 function saveAllSettings() {
   try {
-    currentConfig.concurrency.worker_count = parseInt(document.getElementById("cfg-workers").value, 10);
-    currentConfig.concurrency.gpu_semaphore_limit = parseInt(document.getElementById("cfg-gpu-limit").value, 10);
-    currentConfig.concurrency.cpu_semaphore_limit = parseInt(document.getElementById("cfg-cpu-limit").value, 10);
-    currentConfig.concurrency.prefetch_buffer_depth = parseInt(document.getElementById("cfg-prefetch-depth").value, 10);
-    currentConfig.concurrency.retry_max_attempts = parseInt(document.getElementById("cfg-max-retries").value, 10);
+    // Concurrency
+    currentConfig.concurrency.worker_count = parseInt(document.getElementById("cfg-workers").value, 10) || 4;
+    currentConfig.concurrency.gpu_semaphore_limit = parseInt(document.getElementById("cfg-gpu-limit").value, 10) || 2;
+    currentConfig.concurrency.cpu_semaphore_limit = parseInt(document.getElementById("cfg-cpu-limit").value, 10) || 4;
+    currentConfig.concurrency.prefetch_buffer_depth = parseInt(document.getElementById("cfg-prefetch-depth").value, 10) || 50;
+    currentConfig.concurrency.drain_timeout = document.getElementById("cfg-drain-timeout").value.trim() || "5m";
+    currentConfig.concurrency.retry_max_attempts = parseInt(document.getElementById("cfg-max-retries").value, 10) || 3;
 
+    // Transcoder
     currentConfig.transcoder.hardware_acceleration = document.getElementById("cfg-hwaccel").value;
     currentConfig.transcoder.staging_dir = document.getElementById("cfg-staging-dir").value.trim();
-    currentConfig.transcoder.vmaf_threshold = parseFloat(document.getElementById("cfg-vmaf-thresh").value);
+    currentConfig.transcoder.vmaf_threshold = parseFloat(document.getElementById("cfg-vmaf-thresh").value) || 93.0;
+    currentConfig.transcoder.vmaf_enabled = document.getElementById("cfg-vmaf-enabled").checked;
+    currentConfig.transcoder.vmaf_sample_count = parseInt(document.getElementById("cfg-vmaf-samples").value, 10) || 3;
+    currentConfig.transcoder.vmaf_sample_duration = parseInt(document.getElementById("cfg-vmaf-duration").value, 10) || 30;
+    currentConfig.transcoder.max_job_duration = document.getElementById("cfg-max-job-duration").value.trim() || "4h";
     currentConfig.transcoder.skip_if_larger = document.getElementById("cfg-skip-larger").checked;
     currentConfig.transcoder.overwrite_source = document.getElementById("cfg-overwrite-source").checked;
     currentConfig.transcoder.output_suffix = document.getElementById("cfg-output-suffix").value.trim() || "_crunched";
     currentConfig.transcoder.output_dir = document.getElementById("cfg-output-dir").value.trim();
 
-    const scopesJSON = document.getElementById("cfg-scopes-json").value.trim();
-    if (scopesJSON) {
-      currentConfig.filesystem.scopes = JSON.parse(scopesJSON);
-    }
+    // Notification
+    currentConfig.notification.enabled = document.getElementById("cfg-notif-enabled").checked;
+    currentConfig.notification.batch_window = document.getElementById("cfg-notif-batch-window").value.trim() || "30s";
+    currentConfig.notification.batch_max_size = parseInt(document.getElementById("cfg-notif-batch-max").value, 10) || 10;
+    currentConfig.notification.rate_limit_per_minute = parseInt(document.getElementById("cfg-notif-rate-limit").value, 10) || 30;
+    currentConfig.notification.channels = JSON.parse(document.getElementById("cfg-notif-channels").value) || [];
+
+    // Observability
+    currentConfig.observability.log_level = document.getElementById("cfg-log-level").value || "info";
+    currentConfig.observability.metrics_port = parseInt(document.getElementById("cfg-metrics-port").value, 10) || 9090;
+    currentConfig.observability.log_json = document.getElementById("cfg-log-json").checked;
+
+    // Evaluation global settings
+    currentConfig.evaluation.default_action = document.getElementById("cfg-default-action").value || "transcode";
+    currentConfig.evaluation.default_preset = document.getElementById("cfg-default-preset").value.trim() || "balanced-hevc";
+    currentConfig.evaluation.codec_aliases = JSON.parse(document.getElementById("cfg-codec-aliases").value) || {};
+
+    // Filesystem
+    currentConfig.filesystem.scan_interval = document.getElementById("cfg-scan-interval").value.trim() || "20s";
+    currentConfig.filesystem.ingestion_capacity = parseInt(document.getElementById("cfg-ingestion-capacity").value, 10) || 5000;
+
+    // Rules & presets preserved from currentConfig (not overwritten by form)
+    currentConfig.concurrency.retry_base_interval = currentConfig.concurrency.retry_base_interval || "15s";
+    currentConfig.transcoder.presets = currentConfig.transcoder.presets || [];
 
     saveConfigDirect(currentConfig, "System configuration updated & applied live");
   } catch (e) {
-    alert("Invalid JSON format in Filesystem Scopes: " + e.message);
+    alert("Invalid JSON format in scope/nested fields: " + e.message);
   }
 }
 

@@ -1,3 +1,29 @@
+// Package concurrency provides the Prefetcher, Semaphore, and WorkerPool that
+// form the job execution backbone of MediaCruncher.
+//
+// Prefetcher — Buffer between DB and workers:
+//	The Prefetcher runs as a background goroutine that polls SQLite for pending
+//	queue entries, leases them (state=pending → state=leased), and pushes them
+//	into a bounded channel. This decouples the DB read loop from worker consumption,
+//	preventing workers from blocking on I/O while the DB handles enqueues from
+//	the filesystem scanner.
+//
+//	- Poll interval: 1 second (configurable via pollInterval)
+//	- Batch size: 10 entries per poll
+//	- Lease duration: 30 minutes (entries past this are recovered as orphans)
+//	- Wake channel: external Trigger() wakes the loop immediately without waiting
+//	  for the next poll tick (used when new files are enqueued by the scanner)
+//
+// Semaphore — Hardware-constrained concurrency:
+//	A lightweight semaphore that limits concurrent goroutine access to a shared
+//	resource (GPU encoder or CPU cores). Each worker acquires the semaphore before
+//	starting a transcode job and releases it when complete. When full, workers
+//	block until a slot frees up.
+//
+//	GPU semaphore: used when the selected preset uses hardware encoders (nvenc,
+//	qsv, amf, vaapi). Limits concurrent GPU encodes to avoid exceeding VRAM.
+//	CPU semaphore: used for software encoders (libx264, libx265, libsvtav1, etc.).
+//	Limits concurrent CPU encodes based on available cores.
 package concurrency
 
 import (

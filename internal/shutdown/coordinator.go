@@ -1,3 +1,33 @@
+// Package shutdown implements a deterministic, multi-phase graceful shutdown
+// coordinator for MediaCruncher.
+//
+// Architecture:
+//
+//	The Coordinator enforces a fixed 4-phase shutdown sequence when triggered
+//	(by OS signal via ListenSignals() or explicit Execute() call):
+//
+//	  Phase 1 "Draining Workers" — stop filesystem scanner, drain worker pool
+//	                    (timeout: configurable, default 5m)
+//	  Phase 2 "State Persistence" — stop notification engine, flush queues
+//	              (timeout: 30s)
+//	  Phase 3 "Connection Teardown" — shutdown HTTP server, close DB connections
+//	               (timeout: 15s)
+//	  Phase 4 "Final Reporting" — write final metrics, log shutdown complete
+//	                (timeout: 5s)
+//
+// Each phase runs its handlers concurrently (sync.WaitGroup) and waits for
+// either completion or timeout. Failed handlers are logged but do not block
+// progression to the next phase.
+//
+// Force-kill watchdog:
+//	After all phases complete, a goroutine watches for forceKillTimeout. If the
+//	process hasn't exited naturally (e.g., stuck container signal handler), it
+//	calls os.Exit(1) to guarantee termination. This is critical for container
+//	environments where docker stop may have a default 10s limit.
+//
+// Idempotency:
+//	Execute() is safe to call multiple times — the first call wins and subsequent
+//	calls block on the shutdownDone channel until completion.
 package shutdown
 
 import (
@@ -44,15 +74,27 @@ type Coordinator struct {
 	shutdownTriggered   bool
 	shutdownDone        chan struct{}
 	drainTimeout        time.Duration
+	forceKillTimeout    time.Duration // additional timeout after graceful shutdown before force exit
 }
 
 func NewCoordinator(drainTimeout time.Duration) *Coordinator {
+	return NewCoordinatorWithForceKill(drainTimeout, 30*time.Second)
+}
+
+// NewCoordinatorWithForceKill creates a Coordinator with a force-kill fallback.
+// After drainTimeout expires during graceful shutdown, forceKillTimeout is used
+// to ensure the process exits even if some handlers hang.
+func NewCoordinatorWithForceKill(drainTimeout, forceKillTimeout time.Duration) *Coordinator {
 	if drainTimeout <= 0 {
 		drainTimeout = 5 * time.Minute
 	}
+	if forceKillTimeout <= 0 {
+		forceKillTimeout = 30 * time.Second
+	}
 	return &Coordinator{
-		shutdownDone: make(chan struct{}),
-		drainTimeout: drainTimeout,
+		shutdownDone:     make(chan struct{}),
+		drainTimeout:     drainTimeout,
+		forceKillTimeout: forceKillTimeout,
 	}
 }
 
@@ -92,7 +134,9 @@ func (c *Coordinator) ListenSignals() {
 	}()
 }
 
-// Execute executes the 5-phase shutdown sequence. It is idempotent.
+// Execute executes the shutdown sequence with a force-kill fallback.
+// It is idempotent. After all phases complete or the drain timeout is reached,
+// if forceKillTimeout was configured, a final watchdog ensures process exit.
 func (c *Coordinator) Execute() {
 	c.mu.Lock()
 	if c.shutdownTriggered {
@@ -120,6 +164,20 @@ func (c *Coordinator) Execute() {
 	c.runPhase(PhaseFinalReporting, c.reportingHandlers, 5*time.Second)
 
 	slog.Info("graceful shutdown sequence completed successfully")
+
+	// Force-kill watchdog: if we're running in a container and something is
+	// still blocking exit, ensure we terminate after forceKillTimeout.
+	if c.forceKillTimeout > 0 {
+		go func() {
+			select {
+			case <-time.After(c.forceKillTimeout):
+				slog.Error("shutdown: force-kill timeout reached, exiting forcefully")
+				os.Exit(1)
+			case <-c.shutdownDone:
+				// Already exited normally
+			}
+		}()
+	}
 }
 
 func (c *Coordinator) runPhase(phase Phase, handlers []func(context.Context) error, timeout time.Duration) {

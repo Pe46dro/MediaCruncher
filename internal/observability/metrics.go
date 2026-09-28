@@ -1,3 +1,29 @@
+// Package observability provides centralized metrics collection and production-ready
+// structured logging for MediaCruncher.
+//
+// Metrics (Metrics):
+//	The Metrics struct holds all runtime counters and gauges. It is a singleton
+//	(globalMetrics) accessible via GetMetrics(). All counters use atomic operations
+//	for lock-free concurrent access. Gauges use sync.RWMutex for metrics that need
+//	composite reads (vmafSum, healthMap).
+//
+// Export formats:
+//   - PrometheusFormat() → text/plain; version=0.0.4 (Prometheus scrape target)
+//   - ToJSON() → JSON array of MetricEntry (consumed by /metrics.json endpoint)
+//
+// Logging (SetupLogger):
+//	Initializes slog with configurable level, JSON/text format, and optional
+//	file output with rotation. Call once early in main(). The FileRotatingWriter
+//	implements log rotation (10MB default, 7 backups) without external dependencies.
+//
+// HTTP endpoints:
+//   - /metrics (prometheus handler) — exposed on metricsPort (default 9090)
+//   - /healthz (JSON health probe) — returns status, modules, queue, workers
+//
+// Module health tracking:
+//	Each subsystem (persistence, concurrency, transcoder, filesystem) can report
+//	its health status via SetModuleHealth("module", "healthy"/"degraded"/"unhealthy").
+//	The healthz endpoint aggregates these into an overall status.
 package observability
 
 import (
@@ -145,6 +171,42 @@ mediacruncher_vmaf_score_average %.2f
 		m.WriteActorQueueSize.Load(),
 		avgVMAF,
 	)
+}
+
+// ToJSON exports all metrics in JSON format for API consumers.
+type MetricEntry struct {
+	Name   string      `json:"name"`
+	Value  any         `json:"value"`
+	Type   string      `json:"type"` // "counter" | "gauge"
+}
+
+func (m *Metrics) ToJSON() []MetricEntry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	avgVMAF := 0.0
+	if m.vmafCount > 0 {
+		avgVMAF = m.vmafSum / float64(m.vmafCount)
+	}
+
+	return []MetricEntry{
+		// Counters
+		{Name: "files_scanned_total", Value: m.FilesScannedTotal.Load(), Type: "counter"},
+		{Name: "jobs_submitted_total", Value: m.JobsSubmittedTotal.Load(), Type: "counter"},
+		{Name: "jobs_completed_total", Value: m.JobsCompletedTotal.Load(), Type: "counter"},
+		{Name: "jobs_failed_total", Value: m.JobsFailedTotal.Load(), Type: "counter"},
+		{Name: "quality_failed_total", Value: m.QualityFailedTotal.Load(), Type: "counter"},
+		{Name: "deduplicated_files_total", Value: m.DeduplicatedFiles.Load(), Type: "counter"},
+		{Name: "notifications_sent_total", Value: m.NotificationsSent.Load(), Type: "counter"},
+		// Gauges
+		{Name: "queue_pending_depth", Value: m.QueuePendingDepth.Load(), Type: "gauge"},
+		{Name: "queue_leased_depth", Value: m.QueueLeasedDepth.Load(), Type: "gauge"},
+		{Name: "active_cpu_workers", Value: m.ActiveCPUWorkers.Load(), Type: "gauge"},
+		{Name: "active_gpu_sessions", Value: m.ActiveGPUSessions.Load(), Type: "gauge"},
+		{Name: "write_actor_queue_size", Value: m.WriteActorQueueSize.Load(), Type: "gauge"},
+		// Quality
+		{Name: "vmaf_score_average", Value: avgVMAF, Type: "gauge"},
+	}
 }
 
 // StartHTTPServer launches the metrics and health check HTTP listener.

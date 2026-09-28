@@ -11,6 +11,7 @@ type JobPhase string
 
 const (
 	PhaseEvaluating    JobPhase = "evaluating"
+	PhasePrechecking   JobPhase = "prechecking"
 	PhaseTranscoding   JobPhase = "transcoding"
 	PhaseVerifyingVMAF JobPhase = "verifying_vmaf"
 	PhasePromoting     JobPhase = "promoting"

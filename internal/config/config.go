@@ -1,3 +1,28 @@
+// Package config provides the application configuration system for MediaCruncher.
+//
+// Architecture:
+//
+//	The Manager type is the central config accessor. It is thread-safe via sync.RWMutex
+//	and supports hot-reloading from YAML files or environment variables.
+//
+// Priority order for config values:
+//	 1. CLI defaults (DefaultConfig) — base values for all fields
+//	 2. YAML file (if -config flag is provided) — overrides defaults
+//	 3. Environment variables (MEDIACRUNCHER_*) — override both defaults and YAML
+//
+// Environment variable overrides:
+//
+//	MEDIACRUNCHER_DB_PATH           - Database file path
+//	MEDIACRUNCHER_WORKERS           - Worker pool count
+//	MEDIACRUNCHER_GPU_LIMIT         - GPU concurrency limit
+//	MIDIACRUNCHER_LOG_LEVEL         - Log verbosity (debug/info/warn/error)
+//	MEDIACRUNCHER_METRICS_PORT      - HTTP metrics port
+//	MEDIACRUNCHER_HWACCEL           - Hardware acceleration mode
+//	MEDIACRUNCHER_SCAN_INTERVAL     - Filesystem scan interval (e.g. "20s")
+//
+// Path normalization:
+//	All filesystem paths (database, staging, scan scopes) are normalized via
+//	NavigatePath which resolves tildes and ensures absolute paths.
 package config
 
 import (
@@ -21,6 +46,7 @@ type Config struct {
 	Concurrency   ConcurrencyConfig   `yaml:"concurrency"`
 	Notification  NotificationConfig  `yaml:"notification"`
 	Observability ObservabilityConfig `yaml:"observability"`
+	Scheduling    SchedulingConfig    `yaml:"scheduling"`
 }
 
 type DatabaseConfig struct {
@@ -73,6 +99,7 @@ type TranscoderConfig struct {
 	VMAFThreshold        float64       `yaml:"vmaf_threshold"`        // default 93.0
 	VMAFSampleCount      int           `yaml:"vmaf_sample_count"`     // default 3
 	VMAFSampleDuration   int           `yaml:"vmaf_sample_duration"`  // seconds, default 30
+	PreCheckEnabled      bool          `yaml:"pre_check_enabled"`     // default true — run 30s quality estimate before full encode
 	SkipIfLarger         bool          `yaml:"skip_if_larger"`        // default true
 	OverwriteSource      *bool         `yaml:"overwrite_source"`      // default true (in-place replacement)
 	OutputDir            string        `yaml:"output_dir"`            // optional directory if overwrite_source is false
@@ -121,6 +148,18 @@ type ObservabilityConfig struct {
 	LogLevel    string `yaml:"log_level"`    // debug, info, warn, error
 	MetricsPort int    `yaml:"metrics_port"` // default 9090
 	LogJSON     bool   `yaml:"log_json"`
+	APIKey      string `yaml:"api_key"`      // optional API key for REST API auth
+}
+
+type ScanWindowConfig struct {
+	Start string `yaml:"start"` // e.g. "02:00" or "02:00:00"
+	End   string `yaml:"end"`   // e.g. "06:00"
+}
+
+type SchedulingConfig struct {
+	Enabled       bool               `yaml:"enabled"`
+	ScanWindow    []ScanWindowConfig `yaml:"scan_window"`     // cron-like daily windows
+	PreferredEncoder string          `yaml:"preferred_encoder"`
 }
 
 // Manager manages loading, hot-reloading, and concurrent access to Config.

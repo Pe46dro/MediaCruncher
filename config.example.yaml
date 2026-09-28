@@ -1,5 +1,4 @@
 # MediaCruncher Production Configuration Example
-
 database:
   path: "mediacruncher.db"
   busy_timeout: 5000 # milliseconds to wait on locked SQLite transactions

@@ -1,3 +1,33 @@
+// Package concurrency implements the worker pool and hardware-aware scheduling
+// system for MediaCruncher.
+//
+// Architecture:
+//
+//	The WorkerPool coordinates parallel transcoding jobs using two semaphore tiers:
+//	  - GPU semaphore: limits concurrent hardware-accelerated encodings (NVENC, QSV, etc.)
+//	  - CPU semaphore: limits concurrent software encodings (x264, x265, SVT-AV1, etc.)
+//
+//	Life cycle of a queued job:
+//	  1. Prefetcher picks up a pending entry from DB and leases it
+//	  2. Worker acquires the appropriate semaphore (GPU or CPU)
+//	  3. Evaluation pipeline probes the file and selects a transcoding preset
+//	  4. Transcoder executes the FFmpeg command with progress callbacks
+//	  5. VMAF verification runs (if enabled) — marks job as passed or quality_failed
+//	  6. File is promoted to destination / original marked complete / skipped if too large
+//	  7. Lease released, worker pulls next job
+//
+// Lease recovery:
+//	Every 3 minutes, a background goroutine calls RecoverOrphanedLeases() to reset
+//	leases that expired while the worker was stuck (e.g., FFmpeg hung). On startup,
+//	ResetInFlightJobs() also runs to recover from crashes.
+//
+// Retry logic:
+//	Failed jobs are retried up to RetryMaxAttempts with exponential backoff
+//	(RetryBaseInterval * 2^attempt). After exhausting retries, the job moves to failed.
+//
+// Event callback:
+//	When a job completes (success/fail) or quality check fails, the pool fires
+//	the onEvent callback with event type and payload. This feeds into the notification engine.
 package concurrency
 
 import (
@@ -309,9 +339,20 @@ func (wp *WorkerPool) processEntry(parentCtx context.Context, entry *persistence
 		}
 		return
 
+	// Pixel format safety: flag files requiring manual review before transcode
 	case "transcode":
-		wp.executeTranscode(taskCtx, entry, record)
-	default:
+		if record.Metadata.NeedsManualReview {
+			wp.db.UpdateJobState(entry.ID, persistence.StateReviewRequired, record.Metadata.PixFmtReviewReason)
+			wp.db.RecordAudit(&persistence.AuditLog{
+				EventType:   "job_pixfmt_review",
+				Severity:    "warn",
+				PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"pix_fmt":%q,"chroma":%q,"bit_depth":%d,"reason":%q}`,
+					entry.ID, record.Metadata.PixFmt, record.Metadata.ChromaSubsampling, record.Metadata.BitDepth, record.Metadata.PixFmtReviewReason),
+			})
+			slog.Warn("File flagged for manual pix_fmt review", "id", entry.ID, "pix_fmt", record.Metadata.PixFmt,
+				"chroma", record.Metadata.ChromaSubsampling, "bit_depth", record.Metadata.BitDepth, "reason", record.Metadata.PixFmtReviewReason)
+			return
+		}
 		wp.executeTranscode(taskCtx, entry, record)
 	}
 }
@@ -323,8 +364,34 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 
 	preset := wp.tc.SelectPreset(record.Decision.Preset)
 
-	// Determine destination path based on overwrite configuration
+	// Quick Pre-Check (optional): encode first 30s + VMAF to skip bad presets
+	// Runs BEFORE semaphore acquisition so it doesn't block the worker pool
 	tcCfg := wp.tc.GetConfig()
+	if tcCfg.PreCheckEnabled && record.Metadata.Duration > 60.0 {
+		if wp.tracker != nil {
+			wp.tracker.SetPhase(entry.ID, transcoder.PhasePrechecking, "Quality pre-check (30s segment + VMAF)")
+		}
+		preCheck, err := wp.tc.PreCheck(ctx, entry.FilePath, preset, record.Metadata.Duration, record.Metadata.FileSize)
+		if err != nil {
+			slog.Warn("Pre-check failed (continuing with full encode)", "id", entry.ID, "err", err)
+		} else {
+			slog.Info("Pre-check result", "id", entry.ID, "vmaf", preCheck.EstimatedVMAF, "ssim", preCheck.EstimatedSSIM, "passed", preCheck.Passed)
+			if !preCheck.Passed {
+				wp.db.UpdateJobState(entry.ID, persistence.StateSkipped, fmt.Sprintf("pre-check quality failed: VMAF %.1f < %.1f, SSIM %.4f < 0.90", preCheck.EstimatedVMAF, tcCfg.VMAFThreshold, preCheck.EstimatedSSIM))
+				wp.db.RecordAudit(&persistence.AuditLog{
+					EventType:   "job_skipped_precheck",
+					Severity:    "warn",
+					PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"vmaf":%.2f,"ssim":%.4f,"preset":%q}`, entry.ID, preCheck.EstimatedVMAF, preCheck.EstimatedSSIM, preset.Name),
+				})
+				if wp.onEvent != nil {
+					wp.onEvent("job_skipped_precheck", preCheck)
+				}
+				return
+			}
+		}
+	}
+
+	// Determine destination path based on overwrite configuration
 	destPath := entry.FilePath
 	overwrite := true
 	if tcCfg.OverwriteSource != nil {
@@ -445,6 +512,17 @@ func (wp *WorkerPool) executeTranscode(ctx context.Context, entry *persistence.Q
 	}
 }
 
+// isSegfaultError checks if an error message indicates a segmentation fault.
+func isSegfaultError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "segmentation fault") ||
+		strings.Contains(msg, "core dumped") ||
+		strings.Contains(msg, "SIGSEGV")
+}
+
 func (wp *WorkerPool) handleFailure(entry *persistence.QueueEntry, err error) {
 	if errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "context canceled") {
 		slog.Info("Job was canceled or interrupted, skipping failure handling", "id", entry.ID)
@@ -453,6 +531,25 @@ func (wp *WorkerPool) handleFailure(entry *persistence.QueueEntry, err error) {
 
 	metrics := observability.GetMetrics()
 	metrics.JobsFailedTotal.Add(1)
+
+	// Segfault detection: if the error is a crash (FFmpeg/x265/codec), skip retries
+	// and mark the file as permanently failed immediately. The file needs manual
+	// review before it can be safely re-encoded with a different preset/encoder.
+	if isSegfaultError(err) {
+		slog.Error("Codec/FFmpeg crash detected — marking file failed permanently. Manual review required.",
+			"id", entry.ID, "err", err)
+
+		_ = wp.db.UpdateJobState(entry.ID, persistence.StatePermanentlyFailed, err.Error())
+		_ = wp.db.RecordAudit(&persistence.AuditLog{
+			EventType:   "job_crash",
+			Severity:    "error",
+			PayloadJSON: fmt.Sprintf(`{"queue_id":%d,"error":%q,"crash":true}`, entry.ID, err.Error()),
+		})
+		if wp.onEvent != nil {
+			wp.onEvent("job_failed", entry)
+		}
+		return
+	}
 
 	maxRetries := wp.cfg.RetryMaxAttempts
 	if maxRetries <= 0 {

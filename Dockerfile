@@ -32,6 +32,9 @@ RUN mkdir -p /etc/mediacruncher \
 # Install binary from builder stage
 COPY --from=builder /mediacruncher /usr/local/bin/mediacruncher
 
+# Install curl for health checks
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 # Expose metrics & healthz HTTP port
 EXPOSE 9090
 

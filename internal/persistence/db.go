@@ -1,3 +1,27 @@
+// Package persistence provides SQLite-backed queue management, state tracking,
+// and file signature persistence for MediaCruncher.
+//
+// Architecture — dual DB connection model:
+//  - writeDB: single-connection (MaxOpenConns=1) for all writes, ensuring
+//    strict serialization of enqueues, state transitions, audit logs.
+//  - readDB: connection pool (MaxOpenConns=10) for read-heavy operations
+//    like queue listing, status reporting, audit log queries.
+//
+// SQLite pragmas:
+//  - journal_mode=WAL: Write-Ahead Logging for concurrent read/write access
+//  - synchronous=NORMAL: balanced durability/performance
+//  - busy_timeout={ms}: wait on locked DB instead of failing (default 5000ms)
+//  - foreign_keys=ON: referential integrity enforcement
+//
+// Schema (v1):
+//  - queue_entries:   main job queue (id, file_path, state, priority, retry_count, created_at, leased_at, updated_at)
+//  - audit_logs:      append-only event log (event_type, severity, payload_json, created_at)
+//  - schema_version:  migration tracking
+//
+// Queue states: pending → leased → completed | failed | skipped
+// Lease mechanism: worker claims a pending job by updating state to "leased" and
+// setting worker_id + leased_at. If lease expires (no update), background recovery
+// resets it to pending.
 package persistence
 
 import (
@@ -132,6 +156,17 @@ func applyMigrations(db *sql.DB) error {
 		retry_count INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT,
 		created_at DATETIME NOT NULL
+	);
+
+	-- File signature index for persistent deduplication across scan cycles.
+	-- Updated on every scan with INSERT OR REPLACE so last_scanned is always fresh.
+	CREATE TABLE IF NOT EXISTS file_signatures (
+		path TEXT PRIMARY KEY,
+		size INTEGER NOT NULL,
+		first_mb_hash BLOB NOT NULL,
+		last_mb_hash BLOB NOT NULL,
+		first_seen DATETIME NOT NULL,
+		last_scanned DATETIME NOT NULL
 	);
 	`
 

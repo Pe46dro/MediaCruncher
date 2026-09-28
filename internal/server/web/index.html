@@ -22,7 +22,6 @@
       </div>
       <div>
         <span class="brand-name">MediaCruncher</span>
-        <span class="brand-badge">Zero-CGO</span>
       </div>
     </div>
 
@@ -329,6 +328,23 @@
           </div>
           <div class="form-group">
             <label class="form-label">
+              <input type="checkbox" id="cfg-vmaf-enabled"> Enable VMAF Quality Verification
+            </label>
+          </div>
+          <div class="form-group">
+            <label class="form-label">VMAF Sample Count</label>
+            <input type="number" id="cfg-vmaf-samples" class="form-control" min="1" max="10">
+          </div>
+          <div class="form-group">
+            <label class="form-label">VMAF Sample Duration (seconds)</label>
+            <input type="number" id="cfg-vmaf-duration" class="form-control" min="1" max="120">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Max Job Duration</label>
+            <input type="text" id="cfg-max-job-duration" class="form-control" placeholder="4h">
+          </div>
+          <div class="form-group">
+            <label class="form-label">
               <input type="checkbox" id="cfg-skip-larger"> Skip & Abort if Output Larger than Source
             </label>
           </div>
@@ -352,9 +368,109 @@
       </div>
 
       <div class="card" style="margin-bottom:1.5rem;">
-        <div class="card-title">Filesystem Scopes (JSON format)</div>
+        <div class="card-title">Notification Channels</div>
         <div class="form-group">
-          <textarea id="cfg-scopes-json" class="form-control" style="font-family:monospace; min-height:140px;"></textarea>
+          <label class="form-label">
+            <input type="checkbox" id="cfg-notif-enabled"> Enable Notifications
+          </label>
+        </div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Batch Window</label>
+            <input type="text" id="cfg-notif-batch-window" class="form-control" placeholder="30s">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Batch Max Size</label>
+            <input type="number" id="cfg-notif-batch-max" class="form-control" min="1" max="50">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Rate Limit (per minute)</label>
+            <input type="number" id="cfg-notif-rate-limit" class="form-control" min="1" max="100">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Channels (JSON array)</label>
+          <textarea id="cfg-notif-channels" class="form-control" style="font-family:monospace; min-height:80px;"></textarea>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Observability & Logging</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Log Level</label>
+            <select id="cfg-log-level" class="form-control">
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warn">Warn</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Metrics Port</label>
+            <input type="number" id="cfg-metrics-port" class="form-control" min="1" max="65535">
+          </div>
+          <div class="form-group">
+            <label class="form-label">
+              <input type="checkbox" id="cfg-log-json"> Log as JSON
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Evaluation Rules (Global Settings)</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Default Action</label>
+            <select id="cfg-default-action" class="form-control">
+              <option value="transcode">Transcode</option>
+              <option value="copy">Direct Copy</option>
+              <option value="skip">Skip</option>
+              <option value="review">Flag for Review</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Default Preset</label>
+            <input type="text" id="cfg-default-preset" class="form-control" placeholder="balanced-hevc">
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Codec Aliases (JSON)</label>
+          <textarea id="cfg-codec-aliases" class="form-control" style="font-family:monospace; min-height:60px;"></textarea>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Filesystem Scans</div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Scan Interval</label>
+            <input type="text" id="cfg-scan-interval" class="form-control" placeholder="20s">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ingestion Capacity (buffer size)</label>
+            <input type="number" id="cfg-ingestion-capacity" class="form-control" min="100" max="50000">
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-bottom:1.5rem;">
+        <div class="card-title">Filesystem Scopes (structured form)</div>
+        <div id="scopes-list" style="margin-bottom:1rem;">
+          <!-- Dynamic scopes rendered here -->
+        </div>
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <input type="text" id="new-scope-path" class="form-control" placeholder="/path/to/media" style="flex:1;">
+          <select id="new-scope-exts" class="form-control">
+            <option value=".mp4,.mkv,.mov,.avi,.m4v,.webm">Standard (mp4, mkv, mov, avi)</option>
+            <option value=".mp4,.mkv">MP4 + MKV only</option>
+            <option value=".mp4,.mov,.m4v">MP4 family</option>
+            <option value=".mp4,.mkv,.mov,.avi,.m4v,.webm,.flv,.ts">All common</option>
+            <option value="custom">Custom...</option>
+          </select>
+          <input type="text" id="new-scope-exts-custom" class="form-control" style="width:100px; display:none;" placeholder=".mp4,.mkv">
+          <button id="btn-add-scope" class="btn btn-secondary btn-sm">+ Add Scope</button>
         </div>
       </div>
 

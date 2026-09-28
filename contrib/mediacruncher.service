@@ -1,0 +1,44 @@
+[Unit]
+Description=MediaCruncher - Automated Media Transcoder Daemon
+Documentation=https://github.com/Pe46dro/MediaCruncher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+ExecStart=/usr/local/bin/mediacruncher daemon -config /etc/mediacruncher/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Environment
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=TZ=Europe/Rome
+Environment=MEDIACRUNCHER_LOG_LEVEL=info
+Environment=MEDIACRUNCHER_DB_PATH=/var/lib/mediacruncher/mediacruncher.db
+Environment=MEDIACRUNCHER_METRICS_PORT=9090
+
+# Health check via HTTP (systemd v249+)
+# HealthCheckTimeoutSec=10s
+# HealthCheckStartSec=5s
+# HealthCheckInterval=30s
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mediacruncher
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/mediacruncher /etc/mediacruncher /tmp/mediacruncher
+
+[Install]
+WantedBy=multi-user.target
