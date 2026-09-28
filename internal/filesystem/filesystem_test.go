@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"mediacruncher/internal/config"
+	"mediacruncher/internal/dedupe"
 )
 
 func TestDeduplication(t *testing.T) {
@@ -83,7 +84,8 @@ func TestScanner(t *testing.T) {
 		FollowSymlinks: false,
 	}
 
-	scanner := NewScanner([]config.ScanScopeConfig{scope}, buffer)
+	idx := dedupe.NewIndex()
+	scanner := NewScanner([]config.ScanScopeConfig{scope}, buffer, idx)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
