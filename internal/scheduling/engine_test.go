@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -172,9 +173,9 @@ func TestRemoveNonExistentSchedule(t *testing.T) {
 func TestStartManualScan(t *testing.T) {
 	engine, _ := newTestEngine(t)
 
-	var scanTriggered bool
+	var scanTriggered int32
 	engine.SetTriggerScan(func() {
-		scanTriggered = true
+		atomic.AddInt32(&scanTriggered, 1)
 	})
 
 	// Start the engine so processLoop runs
@@ -187,7 +188,7 @@ func TestStartManualScan(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 	cancel()
 
-	if !scanTriggered {
+	if atomic.LoadInt32(&scanTriggered) == 0 {
 		t.Error("expected triggerScan to be called")
 	}
 }
@@ -372,9 +373,9 @@ func TestListScheduledReturnsCopies(t *testing.T) {
 func TestMultipleScansTriggered(t *testing.T) {
 	engine, _ := newTestEngine(t)
 
-	var triggerCount int
+	var triggerCount int32
 	engine.SetTriggerScan(func() {
-		triggerCount++
+		atomic.AddInt32(&triggerCount, 1)
 	})
 
 	// Start the engine so processLoop runs
@@ -388,8 +389,8 @@ func TestMultipleScansTriggered(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 	cancel()
 
-	if triggerCount < 1 {
-		t.Errorf("expected at least 1 trigger, got %d", triggerCount)
+	if atomic.LoadInt32(&triggerCount) < 1 {
+		t.Errorf("expected at least 1 trigger, got %d", atomic.LoadInt32(&triggerCount))
 	}
 }
 
