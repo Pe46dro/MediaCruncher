@@ -139,16 +139,43 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [build-matrix]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
+      - name: Determine Release Tag
+        id: tag
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            # Generate a dev tag from commit sha
+            COMMIT=$(git rev-parse --short HEAD)
+            echo "tag=dev-${COMMIT}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Download All Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: release-assets
+          path: release-artifacts
+
+      - name: Flatten Artifacts
+        shell: bash
+        run: |
+          mkdir -p release
+          for dir in release-artifacts/*/; do
+            dir_name=$(basename "$dir")
+            for file in "$dir"*; do
+              if [ -f "$file" ]; then
+                cp "$file" release/
+              fi
+            done
+          done
+          ls -la release/
 
       - name: Sign Binaries (Optional)
         shell: bash
@@ -157,11 +184,10 @@ jobs:
           if [ -n "${{ secrets.SIGNING_KEY }}" ]; then
             echo "${{ secrets.SIGNING_KEY }}" | base64 -d > .signing/signing_key.pem
             chmod 600 .signing/signing_key.pem
-            for dir in release-assets/*/; do
-              binary=$(find "$dir" -maxdepth 1 -type f \( -name "mediacruncher-*" \) ! -name "*.sha256" ! -name "*.sig")
-              if [ -n "$binary" ]; then
-                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${binary}.sig" "$binary"
-                echo "Signed: $binary"
+            for file in release/mediacruncher-*.exe; do
+              if [ -f "$file" ]; then
+                openssl dgst -sha256 -sign .signing/signing_key.pem -out "${file}.sig" "$file"
+                echo "Signed: $file"
               fi
             done
           else
@@ -171,22 +197,17 @@ jobs:
       - name: Create Combined Checksums
         shell: bash
         run: |
-          > release-assets/checksums.txt
-          for dir in release-assets/*/; do
-            for file in "$dir"mediacruncher-*; do
-              if [ -f "$file" ] && [[ "$file" != *.sha256 ]] && [[ "$file" != *.sig ]]; then
-                (cd "$dir" && sha256sum "$(basename "$file")") >> release-assets/checksums.txt
-              fi
-            done
-          done
-          cat release-assets/checksums.txt
+          cd release
+          sha256sum * > ../checksums.txt
+          cat ../checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.tag }}
           files: |
-            release-assets/**/*
-            release-assets/checksums.txt
+            release/*
+            checksums.txt
           draft: false
-          prerelease: false
+          prerelease: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v') }}
           generate_release_notes: true
