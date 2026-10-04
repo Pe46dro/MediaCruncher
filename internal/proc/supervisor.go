@@ -7,6 +7,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"syscall"
 )
 
 // CircularBuffer is a thread-safe bounded buffer that keeps the last N bytes written.
@@ -141,6 +142,23 @@ func RunCommand(ctx context.Context, name string, args ...string) ([]byte, []byt
 		return stdoutBytes, stderrBytes, fmt.Errorf("process timed out or canceled: %w", ctx.Err())
 	}
 	if cmdErr != nil {
+		// Check for segfault/signal-based crashes
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				if status.Signaled() {
+					switch status.Signal() {
+					case syscall.SIGSEGV:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg crashed with segmentation fault (SIGSEGV) — likely caused by attached picture/corrupt stream. Try excluding attached pics with explicit stream mapping")
+					case syscall.SIGABRT:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg aborted (SIGABRT) — possible assertion failure or internal error")
+					case syscall.SIGBUS:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg crashed with bus error (SIGBUS) — possible memory access violation")
+					default:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg killed by signal %s: %w", status.Signal(), cmdErr)
+					}
+				}
+			}
+		}
 		return stdoutBytes, stderrBytes, fmt.Errorf("process failed with error (%w): %s", cmdErr, string(bytes.TrimSpace(stderrBytes)))
 	}
 
@@ -235,6 +253,23 @@ func RunCommandWithProgress(ctx context.Context, onStderrLine func(string), name
 		return stdoutBytes, stderrBytes, fmt.Errorf("process cancelled: %w", ctx.Err())
 	}
 	if cmdErr != nil {
+		// Check for segfault/signal-based crashes
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok {
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
+				if status.Signaled() {
+					switch status.Signal() {
+					case syscall.SIGSEGV:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg crashed with segmentation fault (SIGSEGV) — likely caused by attached picture/corrupt stream. Try excluding attached pics with explicit stream mapping")
+					case syscall.SIGABRT:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg aborted (SIGABRT) — possible assertion failure or internal error")
+					case syscall.SIGBUS:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg crashed with bus error (SIGBUS) — possible memory access violation")
+					default:
+						return stdoutBytes, stderrBytes, fmt.Errorf("FFmpeg killed by signal %s: %w", status.Signal(), cmdErr)
+					}
+				}
+			}
+		}
 		return stdoutBytes, stderrBytes, fmt.Errorf("command execution failed (%w): %s", cmdErr, string(bytes.TrimSpace(stderrBytes)))
 	}
 

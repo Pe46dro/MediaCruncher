@@ -331,11 +331,14 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 
 	args = append(args, "-i", job.SourcePath)
 
-	// Apply stream mapping
+	// Apply stream mapping (exclude attached pictures)
 	if len(job.Plan.MapArgs) > 0 {
 		args = append(args, job.Plan.MapArgs...)
 	} else {
-		args = append(args, "-map", "0")
+		args = append(args, "-map", "0:v:0")          // video only
+		args = append(args, "-map", "0:a?")            // all audio streams
+		args = append(args, "-map", "0:s?")            // all subtitle streams
+		args = append(args, "-map", "-0:s:0")          // exclude first subtitle if it's an attached pic
 	}
 
 	// Configure Video Encoder
@@ -394,7 +397,8 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	}
 
 	// Muxing queue limit to prevent frame dropping in multi-stream containers
-	args = append(args, "-max_muxing_queue_size", "1024", stagedPath)
+	// Increased to 4096 for files with many streams (audio+subtitle+attached pics)
+	args = append(args, "-max_muxing_queue_size", "4096", stagedPath)
 
 	// Execute ffmpeg under OS supervisor with progress streaming
 	progressCallback := func(line string) {
