@@ -320,6 +320,17 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 		"-y",
 	}
 
+	// Add input-level resilience flags to prevent crashes on malformed/corrupt MKV files
+	// -fflags +genpts: regenerate timestamps if missing
+	// -fflags +discardcorrupt: skip corrupt packets
+	// -err_detect ignore_err: ignore parsing errors
+	// -ignore_unknown: ignore streams with unknown type
+	// -thread_queue_size: increase input thread buffer for complex files
+	args = append(args, "-fflags", "+genpts+discardcorrupt")
+	args = append(args, "-err_detect", "ignore_err")
+	args = append(args, "-ignore_unknown", "true")
+	args = append(args, "-thread_queue_size", "1024")
+
 	if isHW && strings.Contains(encoder, "vaapi") {
 		renderDevice := "/dev/dri/renderD128"
 		if _, err := os.Stat(renderDevice); err == nil {
@@ -331,14 +342,16 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 
 	args = append(args, "-i", job.SourcePath)
 
-	// Apply stream mapping (exclude attached pictures)
+	// Apply stream mapping — explicitly enumerate streams to avoid attached picture crashes
+	// Attached pictures in MKV often appear as video stream #0:v:0 or subtitle stream
+	// We map streams explicitly to avoid FFmpeg segfaults on complex MKV files
 	if len(job.Plan.MapArgs) > 0 {
 		args = append(args, job.Plan.MapArgs...)
 	} else {
-		args = append(args, "-map", "0:v:0")          // video only
-		args = append(args, "-map", "0:a?")            // all audio streams
-		args = append(args, "-map", "0:s?")            // all subtitle streams
-		args = append(args, "-map", "-0:s:0")          // exclude first subtitle if it's an attached pic
+		args = append(args, "-map", "0:v:0")       // main video (first, non-attached)
+		args = append(args, "-map", "0:a")          // all audio streams (no wildcard)
+		args = append(args, "-map", "0:s")          // all subtitle streams
+		args = append(args, "-map", "-0:s:0")       // exclude first subtitle (often attached pic)
 	}
 
 	// Configure Video Encoder
@@ -374,6 +387,10 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 			args = append(args, "-crf", strconv.Itoa(crf), "-preset", "6", "-svtav1-params", "tune=0")
 		} else {
 			args = append(args, "-crf", strconv.Itoa(crf), "-preset", speed)
+			// Disable high-tier and b-frames for libx265 to prevent crashes on complex inputs
+			if strings.Contains(encoder, "libx265") {
+				args = append(args, "-x265-params", "no-high-tier=1:no-bframes=4:weightp=0")
+			}
 		}
 	}
 
@@ -390,15 +407,17 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 		args = append(args, "-c:s", "copy")
 	}
 
-	// Optional extra flags from preset
-	if job.Preset.ExtraFFmpeg != "" {
-		extraParts := strings.Fields(job.Preset.ExtraFFmpeg)
-		args = append(args, extraParts...)
-	}
-
 	// Muxing queue limit to prevent frame dropping in multi-stream containers
 	// Increased to 4096 for files with many streams (audio+subtitle+attached pics)
-	args = append(args, "-max_muxing_queue_size", "4096", stagedPath)
+	args = append(args, "-max_muxing_queue_size", "4096")
+	
+	// Exclude metadata from input file to prevent crashes with custom MKV metadata
+	args = append(args, "-map_metadata", "-1")
+	
+	// Reset timestamps to prevent timing issues with complex files
+	args = append(args, "-reset_timestamps", "1")
+	
+	args = append(args, stagedPath)
 
 	// Execute ffmpeg under OS supervisor with progress streaming
 	progressCallback := func(line string) {
