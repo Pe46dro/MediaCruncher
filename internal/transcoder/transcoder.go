@@ -144,12 +144,17 @@ func (t *Transcoder) PreCheck(ctx context.Context, sourcePath string, preset con
 	}
 
 	if isHW && strings.Contains(encoder, "vaapi") {
-		renderDevice := "/dev/dri/renderD128"
-		if _, err := os.Stat(renderDevice); err == nil {
-			args = append(args, "-init_hw_device", "vaapi=va:"+renderDevice, "-filter_hw_device", "va")
-		} else {
-			args = append(args, "-init_hw_device", "vaapi=va", "-filter_hw_device", "va")
+		// Use modern VAAPI mode: -vaapi_device /dev/dri/card0 (legacy init_hw_device doesn't work on all setups)
+		renderDevice := "/dev/dri/card0"
+		if _, err := os.Stat(renderDevice); err != nil {
+			renderDevice = "/dev/dri/renderD128"
+			if _, err := os.Stat(renderDevice); err != nil {
+				renderDevice = "/dev/dri"
+			}
 		}
+		args = append(args, "-vaapi_device", renderDevice)
+		// Intel VAAPI on Alder Lake-N and newer requires iHD driver, not i965
+		os.Setenv("LIBVA_DRIVER_NAME", "iHD")
 	}
 
 	// First 30s only
@@ -328,16 +333,19 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	// -thread_queue_size: increase input thread buffer for complex files
 	args = append(args, "-fflags", "+genpts+discardcorrupt")
 	args = append(args, "-err_detect", "ignore_err")
-	args = append(args, "-ignore_unknown", "true")
+	args = append(args, "-ignore_unknown")
 	args = append(args, "-thread_queue_size", "1024")
 
 	if isHW && strings.Contains(encoder, "vaapi") {
-		renderDevice := "/dev/dri/renderD128"
-		if _, err := os.Stat(renderDevice); err == nil {
-			args = append(args, "-init_hw_device", "vaapi=va:"+renderDevice, "-filter_hw_device", "va")
-		} else {
-			args = append(args, "-init_hw_device", "vaapi=va", "-filter_hw_device", "va")
+		// Modern VAAPI mode: -vaapi_device (legacy init_hw_device doesn't work on all setups)
+		renderDevice := "/dev/dri/card0"
+		if _, err := os.Stat(renderDevice); err != nil {
+			renderDevice = "/dev/dri/renderD128"
+			if _, err := os.Stat(renderDevice); err != nil {
+				renderDevice = "/dev/dri"
+			}
 		}
+		args = append(args, "-vaapi_device", renderDevice)
 	}
 
 	args = append(args, "-i", job.SourcePath)
@@ -350,13 +358,23 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	} else {
 		args = append(args, "-map", "0:v:0")       // main video (first, non-attached)
 		args = append(args, "-map", "0:a")          // all audio streams (no wildcard)
-		args = append(args, "-map", "0:s")          // all subtitle streams
-		args = append(args, "-map", "-0:s:0")       // exclude first subtitle (often attached pic)
+		args = append(args, "-map", "0:s")          // all subtitle streams (attached pics are video, not subtitle)
 	}
 
 	// Configure Video Encoder
 	args = append(args, "-c:v", encoder)
 	if isHW && strings.Contains(encoder, "vaapi") {
+		// Modern VAAPI mode: -vaapi_device (legacy init_hw_device doesn't work on all setups)
+		renderDevice := "/dev/dri/card0"
+		if _, err := os.Stat(renderDevice); err != nil {
+			renderDevice = "/dev/dri/renderD128"
+			if _, err := os.Stat(renderDevice); err != nil {
+				renderDevice = "/dev/dri"
+			}
+		}
+		args = append(args, "-vaapi_device", renderDevice)
+		// Intel VAAPI on Alder Lake-N and newer requires iHD driver, not i965
+		os.Setenv("LIBVA_DRIVER_NAME", "iHD")
 		args = append(args, "-vf", "format=nv12,hwupload")
 	} else {
 		// Software encoders: stabilize input to yuv420p 8-bit to prevent crashes
