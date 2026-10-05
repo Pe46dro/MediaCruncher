@@ -3,6 +3,7 @@ package transcoder
 import (
 	"context"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync"
@@ -114,15 +115,23 @@ func isEncoderFunctional(ctx context.Context, encoder string) bool {
 	var cmdArgs []string
 	if strings.Contains(encoder, "vaapi") {
 		// VAAPI requires initializing the hw device and uploading frames
-		renderDevice := "/dev/dri/renderD128"
+		// Use modern -vaapi_device mode (legacy init_hw_device doesn't work on all setups)
+		// Intel VAAPI on Alder Lake-N and newer requires iHD driver
+		renderDevice := "/dev/dri/card0"
 		if _, err := os.Stat(renderDevice); os.IsNotExist(err) {
-			renderDevice = ""
+			renderDevice = "/dev/dri/renderD128"
+			if _, err := os.Stat(renderDevice); os.IsNotExist(err) {
+				renderDevice = "/dev/dri"
+			}
 		}
-		if renderDevice != "" {
-			cmdArgs = []string{"-y", "-init_hw_device", "vaapi=va:" + renderDevice, "-filter_hw_device", "va", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-vf", "format=nv12,hwupload", "-c:v", encoder, "-f", "null", "-"}
-		} else {
-			cmdArgs = []string{"-y", "-init_hw_device", "vaapi=va", "-filter_hw_device", "va", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-vf", "format=nv12,hwupload", "-c:v", encoder, "-f", "null", "-"}
-		}
+		// Inline exec.Command with LIBVA_DRIVER_NAME=iHD (not supported by proc.RunCommand)
+		cmdArgs := []string{"-y", "-vaapi_device", renderDevice, "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-vf", "format=nv12,hwupload", "-c:v", encoder, "-global_quality", "30", "-f", "null", "-"}
+		testCtx, cancel := context.WithTimeout(ctx, 2500*time.Millisecond)
+		defer cancel()
+		cmd := exec.CommandContext(testCtx, "ffmpeg", cmdArgs...)
+		cmd.Env = append(os.Environ(), "LIBVA_DRIVER_NAME=iHD")
+		err := cmd.Run()
+		return err == nil
 	} else {
 		cmdArgs = []string{"-y", "-f", "lavfi", "-i", "testsrc=duration=1:size=256x256:rate=1", "-c:v", encoder, "-f", "null", "-"}
 	}

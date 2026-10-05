@@ -63,7 +63,8 @@ func SynthesizeStreamPlan(meta *NormalizedMetadata, decision MatchedDecision, pr
 
 	// 3. Subtitles Mapping & Preservation
 	if decision.RetainSubtitles && len(meta.SubtitleTracks) > 0 {
-		mapArgs = append(mapArgs, "-map", "0:s?")
+		// Map all subtitle streams (attached pictures are video streams, not subtitles)
+		mapArgs = append(mapArgs, "-map", "0:s")
 		subArgs = append(subArgs, "-c:s", "copy")
 		planNotes = append(planNotes, fmt.Sprintf("Subtitles: %d tracks preserved via copy", len(meta.SubtitleTracks)))
 	}
