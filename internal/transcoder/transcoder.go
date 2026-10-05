@@ -414,8 +414,12 @@ func (t *Transcoder) Execute(ctx context.Context, job *TranscodeJob) (*Transcode
 	// Exclude metadata from input file to prevent crashes with custom MKV metadata
 	args = append(args, "-map_metadata", "-1")
 	
-	// Reset timestamps to prevent timing issues with complex files
-	args = append(args, "-reset_timestamps", "1")
+	// Explicitly specify output format to prevent format detection issues
+	if ext == ".mkv" {
+		args = append(args, "-f", "matroska")
+	} else if ext == ".mp4" {
+		args = append(args, "-f", "mp4")
+	}
 	
 	args = append(args, stagedPath)
 
