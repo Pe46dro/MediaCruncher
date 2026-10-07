@@ -25,6 +25,13 @@ func SynthesizeStreamPlan(meta *NormalizedMetadata, decision MatchedDecision, pr
 	// 1. Primary Video Mapping
 	mapArgs = append(mapArgs, "-map", "0:v:0")
 	planNotes = append(planNotes, "Video: 0:v:0")
+	
+	// Exclude attached pictures from video mapping to prevent FFmpeg SIGSEGV
+	// Attached pictures (covers, posters) are image codecs that crash FFmpeg
+	for _, picIdx := range meta.AttachedPicIndices {
+		mapArgs = append(mapArgs, "-map", fmt.Sprintf("-0:v:%d", picIdx))
+		planNotes = append(planNotes, fmt.Sprintf("Exclude attached pic: 0:v:%d", picIdx))
+	}
 
 	// 2. Audio Mapping & Preservation
 	if len(meta.AudioTracks) > 0 {

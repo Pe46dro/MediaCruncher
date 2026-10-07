@@ -26,6 +26,7 @@ type NormalizedMetadata struct {
 	HDRFormat              string          `json:"hdr_format,omitempty"` // hdr10, dolby_vision, hlg
 	AudioTracks            []AudioTrack    `json:"audio_tracks"`
 	SubtitleTracks         []SubtitleTrack `json:"subtitle_tracks"`
+	AttachedPicIndices     []int           `json:"attached_pic_indices"` // stream indices of attached picture/video covers
 	HasSurround            bool            `json:"has_surround"`
 	HasLossless            bool            `json:"has_lossless"`
 }
@@ -71,6 +72,14 @@ func Normalize(raw *ProbeOutput, filePath string, aliases map[string]string) *No
 	for _, st := range raw.Streams {
 		switch st.CodecType {
 		case "video":
+			// Detect attached pictures (covers, posters) - these are image codecs embedded in video streams
+			// They cause FFmpeg crashes (SIGSEGV) when transcode attempts to process them
+			isAttachedPic := isAttachedPicture(st)
+			if isAttachedPic {
+				norm.AttachedPicIndices = append(norm.AttachedPicIndices, st.Index)
+				break // Skip attached pictures - don't process as regular video
+			}
+			
 			if norm.VideoCodec == "" { // Use primary video stream
 				rawCodec := strings.ToLower(st.CodecName)
 				if resolved, ok := aliases[rawCodec]; ok {
@@ -133,6 +142,20 @@ func Normalize(raw *ProbeOutput, filePath string, aliases map[string]string) *No
 	}
 
 	return norm
+}
+
+// isAttachedPicture detects if a video stream is an attached picture (cover, poster, etc.)
+// Attached pictures are image codecs (png, jpeg, bmp) embedded in video streams.
+// They cause FFmpeg crashes (SIGSEGV) when transcode attempts to process them.
+func isAttachedPicture(st ProbeStream) bool {
+	// Image codecs commonly used as attached pictures
+	imageCodecs := []string{"png", "jpeg", "jpg", "bmp", "mjpeg"}
+	for _, codec := range imageCodecs {
+		if strings.EqualFold(st.CodecName, codec) {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyResolution(width, height int) string {
